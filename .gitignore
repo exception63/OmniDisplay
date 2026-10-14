@@ -1,0 +1,16 @@
+# Local data and build output must never be published.
+.build/
+.swiftpm/
+dist/
+build/
+artifacts/
+_memory/
+*.log
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+xcuserdata/
