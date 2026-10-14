@@ -340,3 +340,78 @@ public final class CoreGraphicsBackend: DisplayBackend {
         guard result == .success else { throw OmniError.message("\(action)失败（CGError \(result.rawValue)）。") }
     }
 }
+
+extension CoreGraphicsBackend {
+    /// All mode writes remain here; the owner serializes bounded workers and owns
+    /// the sole confirmation deadline. Old batch applyRemote stays disabled.
+    public func applyModeStep(_ step: ModeStep, request: Request, restoring: Bool, mayProceed: () -> Bool) throws -> [Display] {
+        try LiveTestConsent.validate(request,restoring:restoring)
+        guard request.before.boot == Self.bootID, let enable else { throw OmniError.message("模式会话或接口失效。") }
+        let observed=try list()
+        guard mayProceed(), TemporaryLayout.matches(step.before,observed), ModePlan.identities(observed,within:request.office.displays) else { throw OmniError.message("模式步骤前出现并发显示调整。") }
+        if step.action == .enable {
+            guard let id=step.target, request.office.displays.contains(where:{$0.id==id}), !observed.contains(where:{$0.id==id}) else { throw OmniError.message("模式连接目标无效。") }
+            _ = reconnectOnly(request.office,target:id)
+        } else if step.action == .disable {
+            guard let id=step.target, let target=observed.first(where:{$0.id==id && !$0.main && !$0.builtin}),
+                  observed.count > 1, let retained=observed.first(where:{$0.id != id && $0.main}),
+                  step.after.contains(where:{$0.id==retained.id}) else { throw OmniError.message("不能关闭主屏、内置屏或最后实体屏。") }
+            try transaction { config in
+                try LiveTestConsent.validate(request,restoring:restoring)
+                guard mayProceed(), DisconnectTopology.sameObservation(observed,try list()),
+                      Self.uuid(target.displayID)==id, Self.uuid(retained.displayID)==retained.id,
+                      CGDisplayIsActive(retained.displayID) != 0, CGDisplayIsMain(target.displayID)==0 else { throw OmniError.message("模式禁用提交前状态变化。") }
+                try check(enable(config,target.displayID,false),"模式逐屏断开")
+            }
+        }
+        func stable(matching:Bool) throws -> [Display] {
+            let end=ProcessInfo.processInfo.systemUptime+2.5
+            var previous:[Display]?
+            while ProcessInfo.processInfo.systemUptime < end {
+                guard mayProceed() else { throw OmniError.message("模式步骤已取消或过期。") }
+                let live=try list()
+                guard ModePlan.identities(live,within:request.office.displays), Set(live.map(\.id))==Set(step.after.map(\.id)) else {
+                    // Expected enable/disable enumeration may take a moment; a new
+                    // unknown screen or missing retained primary is never accepted.
+                    guard ModePlan.identities(live,within:request.office.displays), live.contains(where:{$0.id==step.after.first(where:\.main)?.id}) || step.action == .enable else { throw OmniError.message("模式执行期间出现未知屏幕或保留屏丢失。") }
+                    HelperEventLoop.wait(0.1);continue
+                }
+                if ProcessInfo.processInfo.systemUptime >= end { break }
+                if let previous, DisconnectTopology.sameObservation(previous,live), !matching || TemporaryLayout.matches(step.after,live) { return live }
+                previous=live;HelperEventLoop.wait(0.1)
+            }
+            throw OmniError.message("模式步骤的活动状态/完整排列未及时稳定。")
+        }
+        var current=try stable(matching:false)
+        for saved in step.after {
+            guard let live=current.first(where:{$0.id==saved.id}) else { throw OmniError.message("模式排列目标丢失。") }
+            if abs(live.rotation-saved.rotation) < 0.1 { continue }
+            guard mayProceed(), DisconnectTopology.sameObservation(current,try list()), Self.uuid(live.displayID)==saved.id, ODRotationAvailable() else { throw OmniError.message("模式旋转前状态变化。") }
+            try checkRotation(ODRotateDisplay(live.displayID,Int32(saved.rotation)))
+            current=try RotationWait.wait(target:saved.id,degrees:saved.rotation,timeout:2.5,read:{
+                guard mayProceed() else { throw OmniError.message("模式旋转已取消。") }
+                let live=try self.list()
+                guard ModePlan.identities(live,within:request.office.displays), Set(live.map(\.id))==Set(step.after.map(\.id)) else { throw OmniError.message("模式旋转期间拓扑变化。") };return live
+            })
+        }
+        if TemporaryLayout.matches(step.after,current) { return current }
+        var modes:[String:CGDisplayMode]=[:]
+        for saved in step.after {
+            let live=current.first{$0.id==saved.id}!
+            if live.width != saved.width || live.height != saved.height || live.pixelWidth != saved.pixelWidth || live.pixelHeight != saved.pixelHeight || abs(live.refresh-saved.refresh)>=0.5 {
+                guard let mode=(CGDisplayCopyAllDisplayModes(live.displayID,nil) as? [CGDisplayMode] ?? []).first(where:{$0.width==saved.width && $0.height==saved.height && $0.pixelWidth==saved.pixelWidth && $0.pixelHeight==saved.pixelHeight && abs($0.refreshRate-saved.refresh)<0.5}) else { throw OmniError.message("模式原显示模式不可用。") };modes[saved.id]=mode
+            }
+        }
+        try transaction { config in
+            try LiveTestConsent.validate(request,restoring:restoring)
+            guard mayProceed(), DisconnectTopology.sameObservation(current,try list()) else { throw OmniError.message("模式排列提交前并发变化。") }
+            for saved in step.after {
+                let live=current.first{$0.id==saved.id}!
+                guard Self.uuid(live.displayID)==saved.id, CGDisplayIsActive(live.displayID) != 0 else { throw OmniError.message("模式排列提交前身份变化。") }
+                if let mode=modes[saved.id] { try check(CGConfigureDisplayWithDisplayMode(config,live.displayID,mode,nil),"模式原显示模式") }
+                try check(CGConfigureDisplayOrigin(config,live.displayID,saved.x,saved.y),"模式排列/主屏")
+            }
+        }
+        return try stable(matching:true)
+    }
+}

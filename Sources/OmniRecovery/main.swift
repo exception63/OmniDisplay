@@ -48,6 +48,9 @@ if arguments.count == 2 && arguments[1] == "--inspect-fresh" {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         print(String(decoding: try encoder.encode(report), as: UTF8.self))
     } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+} else if arguments.count == 4 && arguments[1] == "--mode-step" {
+    do { try ModeEngine.worker(directory:URL(fileURLWithPath:arguments[2]),file:arguments[3]) }
+    catch { fputs("\(error.localizedDescription)\n",stderr);exit(1) }
 } else if arguments.count == 4 && arguments[1] == "--input-attempt" && ["apply", "restore"].contains(arguments[3]) {
     do { try InputAttempt.worker(directory: URL(fileURLWithPath: arguments[2]), restoring: arguments[3] == "restore") }
     catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }

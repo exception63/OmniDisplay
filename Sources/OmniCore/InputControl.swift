@@ -26,7 +26,7 @@ public struct InputProbe: Codable, Sendable {
     }
     public static func label(_ value: UInt16) -> String {
         let names: [UInt16: String] = [0x01:"VGA 1",0x03:"DVI 1",0x04:"DVI 2",0x0F:"DisplayPort 1",0x10:"DisplayPort 2",0x11:"HDMI 1",0x12:"HDMI 2"]
-        return "\(names[value] ?? "未知输入") · \(String(format:"0x%02X", value))"
+        return names[value]?.replacingOccurrences(of:" 1",with:"") ?? "未识别输入"
     }
 }
 public enum DDCReply: Equatable {

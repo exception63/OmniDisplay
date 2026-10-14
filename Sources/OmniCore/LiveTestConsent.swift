@@ -17,13 +17,13 @@ public struct LiveTestConsent: Codable, Sendable {
     /// App calls this only from the second confirmation button for the shown target and
     /// explicitly acknowledges physical recovery access. Tests use pure fixtures.
     public static func grant(request: Request, confirmedTarget: String, riskAcknowledged: Bool, now: Date = Date()) throws -> LiveTestConsent {
-        guard !request.simulation, [.disconnect, .inputSource].contains(request.operation),
+        guard !request.simulation, [.disconnect, .inputSource, .remoteMode, .officeMode].contains(request.operation),
               let target = request.target, confirmedTarget == target, riskAcknowledged,
               request.confirmedPhysical else { throw OmniError.message("请核对目标屏幕并确认现场恢复条件。") }
         return LiveTestConsent(requestDigest: try digest(request), issuedAt: now, expiresAt: now.addingTimeInterval(90), targetSuffix: String(target.suffix(8)), riskAcknowledged: true)
     }
     public static func validate(_ request: Request, restoring: Bool = false, now: Date = Date()) throws {
-        guard !request.simulation, [.disconnect, .inputSource].contains(request.operation),
+        guard !request.simulation, [.disconnect, .inputSource, .remoteMode, .officeMode].contains(request.operation),
               let consent = request.liveConsent, consent.riskAcknowledged,
               consent.targetSuffix == String((request.target ?? "").suffix(8)),
               consent.requestDigest == (try? digest(request)),

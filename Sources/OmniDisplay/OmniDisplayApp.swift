@@ -147,6 +147,10 @@ import OmniCore
     func windowDidBecomeKey(_ notification: Notification) { recordUI("managerBecameKey") }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool) -> Bool { if !flag && panel?.isShown != true { showManager() }; return true }
+    func windowWillClose(_ notification:Notification) {
+        model.modePreview=nil
+        if let request=model.transactionRequest, ModePlan.isMode(request.operation), model.busy { model.cancel(source:"managerClosed") }
+    }
     func applicationWillTerminate(_ notification:Notification) { if model.busy { model.cancel() } }
 }
 @available(macOS 27.0, *)
@@ -206,6 +210,7 @@ struct MenuPanel: View {
             }
             ScrollView {
                 VStack(spacing:7) {
+                    ModeControls(model:model,compact:true)
                     if model.simulation { Text("模拟环境").font(.caption).foregroundStyle(.orange) }
                     ForEach(model.sortedDisplays) { d in DisplayRow(model:model,display:d,compact:true) }
                 }.frame(maxWidth:.infinity)

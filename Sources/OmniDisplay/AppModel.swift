@@ -4,6 +4,10 @@ import AppKit
 import OmniCore
 
 @MainActor final class AppModel: ObservableObject {
+    @Published var modePreview: ModePreview?
+    @Published var modeKeep = ""
+    @Published var officeLayout: Snapshot?
+    @Published var requestedInputs: [String: UInt16] = [:]
     @Published var displays: [Display] = []
     @Published var selectedID: String?
     @Published var status = "只读检测中…"
@@ -29,6 +33,7 @@ import OmniCore
     let demoCount: Int
     private var registry: Snapshot?
     private var layoutSession: LayoutSession?
+    private var modeBaselineError: String?
     private var sessionLoadError: String?
     private var sessionURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-layout-session.json" : "layout-session.json") }
     private var timer: Timer?
@@ -65,15 +70,23 @@ import OmniCore
             do { layoutSession = try Files.read(LayoutSession.self, from: sessionURL) }
             catch { sessionLoadError = "完整排列记录无法读取；已阻止覆盖和切换，请保留记录供检查。"; self.error = sessionLoadError }
         }
+        if FileManager.default.fileExists(atPath:modeOfficeURL.path) {
+            do { officeLayout=try Files.read(Snapshot.self,from:modeOfficeURL) }
+            catch { modeBaselineError="办公室基线损坏，已阻止模式切换；请保留记录供检查。";self.error=modeBaselineError }
+        }
         refresh()
+        modeKeep = displays.first(where: { $0.main && $0.active })?.id ?? ""
         if layout == nil { saveCurrentLayout() }
         status = simulation ? "模拟模式 · 不改变真实显示器" : "点击一块屏幕，选择连接或断开"
         if let path = try? Files.read(String.self, from: activeURL) {
             let candidate = URL(fileURLWithPath: path)
             if candidate.deletingLastPathComponent().standardizedFileURL == dataDirectory.appendingPathComponent("Transactions").standardizedFileURL,
                let request = try? Files.read(Request.self, from: candidate.appendingPathComponent("request.json")), request.simulation == simulation,
-               let result = try? Files.read(Receipt.self, from: candidate.appendingPathComponent("receipt.json")), !result.phase.terminal {
-                journal = candidate; receipt = result; sentExecute = true; transactionRequest = request
+               let result = try? Files.read(Receipt.self, from: candidate.appendingPathComponent("receipt.json")) {
+                if !result.phase.terminal { journal = candidate; receipt = result; sentExecute = true; transactionRequest = request }
+                else if result.phase == .failed, ModePlan.isMode(request.operation), !TemporaryLayout.matches(request.office.displays,displays.filter(\.active)) {
+                    error="上次模式恢复未完成。请核对实体画面后选择办公室恢复；原基线与事务入口均已保留。"
+                }
             }
         }
         retireRestoredSession()
@@ -82,9 +95,40 @@ import OmniCore
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.refresh() } })
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in
-                guard let self else { return }; if self.busy { self.cancel() }; self.confirmation = nil; self.physicalConfirmed = false; self.refresh()
+                guard let self else { return }; if self.busy { self.cancel() }; self.confirmation = nil; self.modePreview = nil; self.physicalConfirmed = false; self.refresh()
             } })
         }
+    }
+    private var modeOfficeURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-mode-office.json" : "mode-office.json") }
+    var modeScreens: [Display] { (officeLayout?.displays ?? layoutSession?.original.displays ?? displays).sorted { $0.main && !$1.main } }
+    var modeStatus: String { ModePlan.status(current:displays.filter(\.active),office:officeLayout ?? layoutSession?.original ?? layout) }
+    func prepareMode(_ action: OmniCore.Operation) {
+        guard !busy, probingInput == nil, ModePlan.isMode(action) else { return }
+        if let modeBaselineError { error=modeBaselineError;return }
+        do {
+            refresh()
+            let entry = Snapshot(boot:currentBoot,displays:displays.filter(\.active))
+            let baseline = officeLayout ?? layoutSession?.original ?? layout ?? entry
+            guard baseline.displays.allSatisfy(\.active), baseline.boot == currentBoot else { throw OmniError.message("办公室完整基线缺失或跨开机；请先连齐屏幕，以当前排列为准。") }
+            let keep = action == .officeMode ? (baseline.displays.first(where: \.main)?.id ?? "") : modeKeep
+            let request = Request(operation:action,before:entry,office:baseline,keep:keep,confirmedPhysical:true,simulation:simulation,target:keep)
+            let plan = try ModePlan.make(request)
+            if plan.steps.isEmpty { status = "当前硬件已符合所选模式。"; return }
+            actionDisplay=nil;onShowManager?();modePreview=ModePreview(request:request)
+        } catch { self.error=error.localizedDescription }
+    }
+    func executeMode(_ preview: ModePreview, confirmed: Bool) {
+        guard confirmed, !busy, modePreview?.id == preview.id else { return }
+        do {
+            refresh()
+            var request=preview.request
+            guard TemporaryLayout.matches(request.before.displays,displays.filter(\.active)) else { throw OmniError.message("预览后屏幕状态变化，请重新选择模式。") }
+            _ = try ModePlan.make(request)
+            if !simulation { request.liveConsent = try LiveTestConsent.grant(request:request,confirmedTarget:request.keep,riskAcknowledged:confirmed) }
+            // Persist once before any worker; no intermediate checkpoint becomes the office baseline.
+            try Files.write(request.office,to:modeOfficeURL);officeLayout=request.office
+            try launch(request);modePreview=nil
+        } catch { self.error=error.localizedDescription }
     }
     private var activeURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-active.json" : "active.json") }
     private func retireRestoredSession() {
@@ -109,7 +153,7 @@ import OmniCore
             error = "完整排列已单独保留。请先连接目标并恢复完整排列，再保存新基准。"; return
         }
         let saved = Snapshot(boot: currentBoot, displays: displays)
-        do { try Files.write(saved, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json")); layout = saved; status = "已将当前排列设为基准；不记录应用窗口。" } catch { self.error = error.localizedDescription }
+        do { guard saved.displays.allSatisfy(\.active), Set(saved.displays.map(\.id)) == Set((officeLayout?.displays ?? saved.displays).map(\.id)) else { throw OmniError.message("请连齐所有管理屏幕后再保存办公室基线。") }; try Files.write(saved,to:modeOfficeURL);officeLayout=saved;modeBaselineError=nil; try Files.write(saved, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json")); layout = saved; status = "已将当前排列设为基准；不记录应用窗口。" } catch { self.error = error.localizedDescription }
     }
     @Published var layout: Snapshot?
     func refresh() {
@@ -288,7 +332,7 @@ import OmniCore
                 request.liveConsent = try LiveTestConsent.grant(request: request, confirmedTarget: target, riskAcknowledged: confirmed)
             }
             _ = try InputChangePlan(request: request)
-            try launch(request); actionDisplay = nil
+            try launch(request); requestedInputs[target] = value; actionDisplay = nil
         } catch { self.error = error.localizedDescription }
     }
     private func launch(_ request: Request) throws {
@@ -306,7 +350,9 @@ import OmniCore
         status = "正在准备目标屏幕操作…"
     }
     var awaitingDecision: Bool { busy && receipt?.phase == .awaitingConfirmation }
-    var keepButtonTitle: String { transactionRequest?.operation == .disconnect ? "保留断开" : "保留更改" }
+    var keepButtonTitle: String {
+        switch transactionRequest?.operation { case .remoteMode: return "保留远程模式"; case .officeMode:return "保留办公室模式"; case .disconnect:return "保留断开";default:return "保留更改" }
+    }
     var transactionTargetName: String {
         transactionRequest?.before.displays.first(where: { $0.id == transactionRequest?.target })?.name ?? "目标屏幕"
     }
@@ -349,14 +395,17 @@ import OmniCore
         if let next = try? Files.read(Receipt.self, from: journal.appendingPathComponent("receipt.json")) {
             receipt = next; status = next.message
             if next.phase == .ready && !sentExecute { do { try Files.marker("execute", in: journal); sentExecute = true } catch { self.error = error.localizedDescription; cancel() } }
-            if simulation, let state = try? Files.read([Display].self, from: journal.appendingPathComponent("simulated-displays.json")) { displays = state }
+            if simulation, let state = try? Files.read([Display].self, from: journal.appendingPathComponent("simulated-displays.json")) {
+                let known = ModePlan.isMode(transactionRequest?.operation ?? .connect) ? (officeLayout?.displays ?? []) : []
+                displays = state + known.filter { d in !state.contains(where:{$0.id==d.id}) }.map { d in var offline=d;offline.active=false;offline.main=false;return offline }
+            }
             if simulation, let inputs = try? Files.read([String: UInt16].self, from: journal.appendingPathComponent("simulated-inputs.json")) {
                 for (target, value) in inputs { inputProbes[target] = InputProbe(target: target, state: .readable, current: value, detail: "模拟输入源；真实屏幕未改变。", simulation: true) }
             }
             if next.phase == .failed { error = next.message }
         }
         if !(receipt?.phase.terminal ?? false), (process.map { !$0.isRunning } ?? !RecoveryEngine.operationIsRunning(parent: journal.deletingLastPathComponent())) {
-            receipt = Receipt(.failed, "操作进程已退出。请刷新检查目标屏幕；不要重复断开。")
+            receipt = Receipt(.failed, "上次操作进程已退出，恢复未确认。完整办公室基线和事务入口已保留；请检查实体屏幕后选择办公室恢复，勿重复断开。")
             error = receipt?.message
         }
     }

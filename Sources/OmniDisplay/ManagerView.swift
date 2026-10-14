@@ -26,6 +26,7 @@ struct ManagerView: View {
                 }.padding(.top, 16)
                 if model.simulation { Label("模拟模式 · \(model.demoCount) 屏 · 所有操作不改变真实显示器", systemImage: "testtube.2").foregroundStyle(.orange).font(.callout) }
                 if let error = model.error { HStack(alignment: .top) { Image(systemName: "exclamationmark.triangle"); Text(error).textSelection(.enabled); Spacer(); Button { model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }.font(.callout).foregroundStyle(.red).padding(15).background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 14)) }
+                ModeControls(model:model).padding(20).modifier(GlassCard())
                 VStack(alignment: .leading, spacing: 18) {
                     HStack { Label("屏幕排列", systemImage: "rectangle.3.group").font(.headline); Spacer(); Text("\(model.activeCount) 活动 · \(model.displays.count) 已知").font(.caption).foregroundStyle(.secondary) }
                     DisplayMap(model: model).frame(height: 220)
@@ -47,12 +48,13 @@ struct ManagerView: View {
                         Text("部分屏幕可能仍需物理拔插；独立恢复进程不能保证硬件或 WindowServer 故障时恢复。").font(.caption).foregroundStyle(.secondary)
                     }
                 }.padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
-                HStack { Text(model.status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled); Spacer(); Text("OmniDisplay 0.4 · 单屏控制").font(.caption2).foregroundStyle(.tertiary) }
+                HStack { Text(model.status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled); Spacer(); Text("OmniDisplay 0.5 · 屏幕与工作模式").font(.caption2).foregroundStyle(.tertiary) }
             }.padding(30)
         }.background { ZStack { Color(nsColor: .windowBackgroundColor); LinearGradient(colors: [accent.opacity(0.12), .clear, Color.cyan.opacity(0.06)], startPoint: .topTrailing, endPoint: .bottomLeading) }.ignoresSafeArea() }.tint(accent)
         .safeAreaInset(edge: .top, spacing: 0) {
             if model.busy { TransactionBanner(model: model).padding(16).background(.regularMaterial) }
         }
+        .sheet(item:$model.modePreview) { preview in ModeReview(model:model,preview:preview) }
         .sheet(item: $model.actionDisplay, onDismiss: { model.confirmation = nil; model.physicalConfirmed = false; model.testRiskAcknowledged = false }) { display in
             VStack(spacing: 0) {
                 HStack { Text("屏幕操作").font(.headline); Spacer(); Button("完成") { model.actionDisplay = nil }.keyboardShortcut(.cancelAction) }.padding(20)
@@ -156,7 +158,7 @@ struct ScreenActions: View {
 struct InputSourceControls: View {
     @ObservedObject var model: AppModel
     let display: Display
-    @State private var choice: UInt16 = 0x0F
+    @State private var choice: UInt16 = 0
     @State private var reviewing = false
     @State private var physical = false
     @State private var portLabel = ""
@@ -170,8 +172,10 @@ struct InputSourceControls: View {
                     .disabled(model.busy || model.probingInput != nil || !display.active)
             }
             if let probe = model.inputProbes[display.id] {
+                Text("Mac 连接：\(display.active ? "已启用" : "未启用")").font(.caption)
+                if let requested=model.requestedInputs[display.id] { Text("上次请求：\(model.mappedInputPorts(display.id).first{$0.code==requested}?.label ?? InputProbe.label(requested)) · 不代表物理画面已切换").font(.caption).foregroundStyle(.secondary) }
                 Text(probe.state.title).font(.caption).foregroundStyle(probe.state == .readable ? .primary : .secondary)
-                if let current = probe.current { Text(model.mappedInputPorts(display.id).first(where: { $0.code == current })?.label ?? InputProbe.label(current)).font(.callout.monospacedDigit()) }
+                if let current = probe.current { Text("最后读回：" + (model.mappedInputPorts(display.id).first(where: { $0.code == current })?.label ?? InputProbe.label(current))).font(.callout.monospacedDigit()) }
                 if probe.state != .readable { Text("未取得可靠输入值，禁止试写。请检查实体菜单中 DDC/CI；当前链路或系统也可能不支持。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
                 DisclosureGroup("检测详情") { ScrollView { Text(probe.detail).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }.frame(height: 90) }.font(.caption)
                 if probe.state == .readable {
@@ -188,12 +192,12 @@ struct InputSourceControls: View {
                     }
                     if model.simulation || model.inputTestReason(display) == nil {
                         Picker("目标输入", selection: $choice) {
-                            if model.simulation { ForEach([UInt16(0x11), 0x12, 0x0F, 0x10], id: \.self) { Text(InputProbe.label($0)).tag($0) } }
+                            if model.simulation { Text("选择输入源").tag(UInt16(0)); ForEach([UInt16(0x11), 0x0F], id: \.self) { Text(InputProbe.label($0)).tag($0) } }
                             else { Text("选择已记录端口").tag(UInt16(0)); ForEach(model.mappedInputPorts(display.id)) { Text($0.label).tag($0.code) } }
                         }
                         if reviewing {
                             Text("从：\(model.mappedInputPorts(display.id).first(where: { $0.code == probe.current })?.label ?? InputProbe.label(probe.current ?? 0)) → 到：\(model.mappedInputPorts(display.id).first(where: { $0.code == choice })?.label ?? InputProbe.label(choice))").font(.callout).fixedSize(horizontal: false, vertical: true)
-                            Text("只切换 \(display.name)（\(display.shortID)）。45秒内未确认将尝试恢复原输入。切走后可能失去 DDC 通道，软件不能保证切回；请准备使用实体 OSD 选回 Mac 原输入。").font(.caption).fixedSize(horizontal: false, vertical: true)
+                            Text("只切换 \(display.name)。45秒内未确认将尝试恢复原输入。切走后可能失去 DDC 通道，软件不能保证切回；请准备使用实体 OSD 选回 Mac 原输入。").font(.caption).fixedSize(horizontal: false, vertical: true)
                             Toggle("我在现场，保留另一块可见实体屏，并会用 OSD 切回", isOn: $physical).font(.caption)
                             HStack {
                                 Button("取消") { reviewing = false; physical = false }
@@ -202,7 +206,7 @@ struct InputSourceControls: View {
                         } else { Button(model.simulation ? "预览模拟切源" : "预览单次切源测试") { reviewing = true; physical = false }.disabled(model.busy || choice == probe.current || choice == 0 || model.activeCount < 2 || (!model.simulation && !model.mappedInputPorts(display.id).contains(where: { $0.code == choice }))) }
                     } else if let reason = model.inputTestReason(display) { Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
                 }
-            } else { Text("检测当前输入，不切换端口。系统“活动”不代表屏幕正在显示 Mac。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            } else { Text("Mac连接：\(display.active ? "已启用" : "未启用")。尚无信号源读数；检测不会切换输入。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
         }.onChange(of: choice) { _ in reviewing = false; physical = false }
     }
 }

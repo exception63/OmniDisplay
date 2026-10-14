@@ -85,6 +85,9 @@ public enum TemporaryLayout {
             if bottom(a) <= Int64(b.y) && bottom(x) > Int64(y.y) { return false }
         } }; return true
     }
+    public static func validArrangement(_ values:[Display]) -> Bool {
+        !values.isEmpty && nonoverlapping(values) && components(values).count == 1 && values.first(where:\.main).map { $0.x==0 && $0.y==0 } == true
+    }
     public static func plan(_ original: [Display], removing target: String) throws -> [Display] {
         guard original.count > 1, original.count <= 24, Set(original.map(\.id)).count == original.count, Set(original.map(\.displayID)).count == original.count,
               original.allSatisfy({ UUID(uuidString: $0.id) != nil && $0.rotation.isFinite && [0.0,90,180,270].contains($0.rotation) && $0.refresh.isFinite && $0.active && !$0.mirrored && $0.width > 0 && $0.height > 0 && $0.width <= 131072 && $0.height <= 131072 }),

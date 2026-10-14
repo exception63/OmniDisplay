@@ -89,7 +89,7 @@ enum ConfirmationPlacement {
         let ids = screens.map(screenID)
         let mainID = CGDisplayCreateUUIDFromDisplayID(CGMainDisplayID()).map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String } ?? ""
         let request = model.transactionRequest
-        let preferred = [request?.before.displays.first(where: { $0.main && $0.active && $0.id != request?.target })?.id, request?.keep].compactMap { $0 }
+        let preferred = (request.map { ModePlan.isMode($0.operation) } == true ? [request?.keep] : [request?.before.displays.first(where: { $0.main && $0.active && $0.id != request?.target })?.id, request?.keep]).compactMap { $0 }
         guard let index = ConfirmationPlacement.screenIndex(ids: ids, preferred: preferred, mainID: mainID) else {
             model.recordConfirmationUI("panelScreenUnavailable"); return
         }
@@ -132,7 +132,7 @@ struct ConfirmationPanelView: View {
                 HStack { ProgressView().controlSize(.small); Text(model.simulation ? "模拟 · 操作进度" : "正在处理屏幕操作").font(.title2.bold()) }
                 Text("目标：\(model.transactionTargetName)").foregroundStyle(.secondary)
                 Text(model.status).fixedSize(horizontal: false, vertical: true)
-                Text("布局核验通过后将显示45秒确认。失败或取消时尝试回连并恢复原排列。").font(.callout).foregroundStyle(.secondary)
+                Text("布局核验通过后将显示45秒确认。失败或取消时尝试回连并恢复切换前状态。").font(.callout).foregroundStyle(.secondary)
                 Button("取消并尝试恢复") { model.cancel(source: "progressPanel") }.disabled(model.decisionPending)
             } else {
             HStack(alignment: .top) {
@@ -145,7 +145,7 @@ struct ConfirmationPanelView: View {
                 Text("\(model.countdown)秒").font(.system(size: 30, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(.orange)
                     .accessibilityIdentifier("confirmation.countdown")
             }
-            Text(model.transactionRequest?.operation == .disconnect ? "请检查主屏和其他保留屏幕：画面与旋转正常、屏幕按预览临时靠拢后，点击「保留断开」。" : "请检查保留屏幕的画面，正常后点击「保留更改」。")
+            Text(model.transactionRequest?.operation == .disconnect ? "请检查主屏和其他保留屏幕：画面与旋转正常、屏幕按预览临时靠拢后，点击「保留断开」。" : "请检查保留屏幕的画面，正常后点击「\(model.keepButtonTitle)」。")
                 .font(.body).fixedSize(horizontal: false, vertical: true)
             Text(model.countdown > 0 ? "不操作将在倒计时结束后尝试恢复。\(model.simulation ? "本次不会改变实体显示器。" : "恢复无法保证处理硬件或系统故障。")" : "确认时间已结束，正在等待恢复结果…")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

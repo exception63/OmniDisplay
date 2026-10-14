@@ -12,6 +12,6 @@ public enum MenuPopoverLayout {
         let availableHeight = min(anchor.minY, visibleFrame.maxY) - visibleFrame.minY - 32
         let availableWidth = visibleFrame.width - 32
         guard availableHeight >= 170, availableWidth >= 240 else { return nil }
-        return CGSize(width: min(340, availableWidth), height: min(150 + CGFloat(max(1, displayCount)) * 62, 480, availableHeight))
+        return CGSize(width: min(340, availableWidth), height: min(300 + CGFloat(max(1, displayCount)) * 62, 480, availableHeight))
     }
 }

@@ -20,7 +20,7 @@ public enum RecoveryEngine {
             throw OmniError.message("恢复请求格式或超时时间无效。")
         }
         if request.operation == .remote { try LiveSwitchPolicy.validate(simulation: request.simulation) }
-        if request.operation == .disconnect && !request.simulation { try LiveTestConsent.validate(request) }
+        if (request.operation == .disconnect || ModePlan.isMode(request.operation)) && !request.simulation { try LiveTestConsent.validate(request) }
         if request.operation == .inputSource { try InputControl.validateWrite(simulation: request.simulation, request: request) }
         let lockURL = directory.deletingLastPathComponent().appendingPathComponent("operation.lock")
         let fd = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
@@ -29,7 +29,7 @@ public enum RecoveryEngine {
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC) // I/O worker must not inherit the recovery owner’s lock.
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw OmniError.message("另一项显示操作尚未结束。") }
         defer { flock(fd, LOCK_UN) }
-        if !request.simulation && [.disconnect, .inputSource].contains(request.operation) {
+        if !request.simulation && [.disconnect, .inputSource, .remoteMode, .officeMode].contains(request.operation) {
             let claim = open(directory.appendingPathComponent("live-transaction.claim").path, O_CREAT | O_EXCL | O_WRONLY, S_IRUSR | S_IWUSR)
             guard claim >= 0 else { throw OmniError.message("这次真机测试已使用，拒绝重放。请重新确认新的单次测试。") }; close(claim)
         }
@@ -75,6 +75,7 @@ public enum RecoveryEngine {
             HelperEventLoop.wait(0.1)
         }
         if exists("cancel") { try status(Receipt(.restored, "已取消，未修改显示设置。")); return }
+        if ModePlan.isMode(request.operation) { try ModeEngine.run(request:request,directory:directory,status:status);return }
         if request.operation == .inputSource {
             let plan = try InputChangePlan(request: request)
             if !request.simulation {
