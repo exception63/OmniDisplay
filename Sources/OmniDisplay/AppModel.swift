@@ -28,6 +28,9 @@ import OmniCore
     let dataDirectory: URL
     let demoCount: Int
     private var registry: Snapshot?
+    private var layoutSession: LayoutSession?
+    private var sessionLoadError: String?
+    private var sessionURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-layout-session.json" : "layout-session.json") }
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var process: Process?
@@ -58,6 +61,10 @@ import OmniCore
         if simulation { displays = Display.samples(demoCount); registry = Snapshot(boot: "simulation", displays: displays) }
         inputPortMappings = (try? Files.read([String: [InputPortMapping]].self, from: dataDirectory.appendingPathComponent("input-ports.json"))) ?? [:]
         layout = try? Files.read(Snapshot.self, from: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json"))
+        if FileManager.default.fileExists(atPath: sessionURL.path) {
+            do { layoutSession = try Files.read(LayoutSession.self, from: sessionURL) }
+            catch { sessionLoadError = "完整排列记录无法读取；已阻止覆盖和切换，请保留记录供检查。"; self.error = sessionLoadError }
+        }
         refresh()
         if layout == nil { saveCurrentLayout() }
         status = simulation ? "模拟模式 · 不改变真实显示器" : "点击一块屏幕，选择连接或断开"
@@ -69,6 +76,7 @@ import OmniCore
                 journal = candidate; receipt = result; sentExecute = true; transactionRequest = request
             }
         }
+        retireRestoredSession()
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.refresh() } })
@@ -79,8 +87,27 @@ import OmniCore
         }
     }
     private var activeURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-active.json" : "active.json") }
+    private func retireRestoredSession() {
+        guard !busy, let session = layoutSession, session.original.boot == currentBoot,
+              !RecoveryEngine.operationIsRunning(parent: dataDirectory.appendingPathComponent("Transactions")),
+              session.matchesOriginal(displays.filter(\.active)) else { return }
+        do {
+            let fresh = simulation ? displays.filter(\.active) : try backend.list()
+            guard session.matchesOriginal(fresh), !RecoveryEngine.operationIsRunning(parent: dataDirectory.appendingPathComponent("Transactions")) else { return }
+            // Preserve the immutable completed snapshot before retiring the active guard.
+            let archive = dataDirectory.appendingPathComponent("CompletedLayouts")
+            try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+            try Files.write(session, to: archive.appendingPathComponent(UUID().uuidString + ".json"))
+            try FileManager.default.removeItem(at: sessionURL)
+            layoutSession = nil
+        } catch { self.error = "完整排列已恢复，但记录归档失败：\(error.localizedDescription)" }
+    }
     func saveCurrentLayout() {
         guard !busy else { return }; refresh()
+        if let sessionLoadError { error = sessionLoadError; return }
+        if let session = layoutSession, !session.matchesOriginal(displays.filter(\.active)) {
+            error = "完整排列已单独保留。请先连接目标并恢复完整排列，再保存新基准。"; return
+        }
         let saved = Snapshot(boot: currentBoot, displays: displays)
         do { try Files.write(saved, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json")); layout = saved; status = "已将当前排列设为基准；不记录应用窗口。" } catch { self.error = error.localizedDescription }
     }
@@ -103,12 +130,16 @@ import OmniCore
         } catch { self.error = error.localizedDescription }
     }
     func reason(for action: OmniCore.Operation, display: Display) -> String? {
+        if let sessionLoadError { return sessionLoadError }
         if busy || probingInput != nil { return "请等待当前操作结束。" }
         if action == .disconnect {
             if !display.active { return "屏幕已不活动。" }
             if activeCount <= 1 { return "不能断开最后一块活动屏幕。" }
-            if !simulation && display.main { return "主屏受保护，请选择一块非主屏。" }
-            if !simulation && display.builtin { return "内置屏受保护。" }
+            if display.main { return "主屏受保护，请选择一块非主屏。" }
+            if display.builtin { return "内置屏受保护。" }
+            if let session = layoutSession, !session.matchesOriginal(displays.filter(\.active)) { return "已有未恢复的完整排列；请先连接上次目标并核对排列。" }
+            do { _ = try LayoutSession.make(original: Snapshot(boot: currentBoot, displays: displays.filter(\.active)), target: display.id) }
+            catch { return error.localizedDescription }
             if !simulation && !backend.canDisconnect { return "当前系统的断开接口不可用。" }
             if displays.contains(where: { $0.active && $0.mirrored }) { return "镜像模式不支持断开。" }
             if !simulation && (display.vendor == 0 || display.model == 0 || displays.filter({ $0.vendor == display.vendor && $0.model == display.model && $0.serial == display.serial }).count != 1) { return "恢复指纹不唯一，不能安全进行断开测试。" }
@@ -118,6 +149,14 @@ import OmniCore
             if !simulation && !backend.canDisconnect { return "本系统不支持重新连接接口。" }
         }
         return nil
+    }
+    func temporaryLayoutPreview(target: String) -> String {
+        guard let session = try? LayoutSession.make(original: Snapshot(boot: currentBoot, displays: displays.filter(\.active)), target: target) else { return "当前排列无法安全规划。" }
+        let changes = session.temporary.displays.compactMap { d -> String? in
+            guard let old=session.original.displays.first(where:{$0.id==d.id}), old.x != d.x || old.y != d.y else { return nil }
+            return "\(d.name)：(\(old.x), \(old.y)) → (\(d.x), \(d.y))"
+        }
+        return changes.isEmpty ? "临时排列：其他屏幕保持原位。" : "临时排列（点）：\n" + changes.joined(separator:"\n")
     }
     func openActions(_ id: String) {
         choose(id)
@@ -139,20 +178,31 @@ import OmniCore
             }
             guard requestTopology == displays else { throw OmniError.message("连接状态变化，请重新选择。") }
             _ = try SingleDisplayPlan.make(action: action, target: selected.id, displays: displays, retainedPhysical: retained)
+            if let reason = reason(for: action, display: selected) { throw OmniError.message(reason) }
+            var session = layoutSession
             if action == .disconnect {
-                let captured = Snapshot(boot: currentBoot, displays: displays)
+                let captured = Snapshot(boot: currentBoot, displays: displays.filter(\.active))
+                session = try LayoutSession.make(original: captured, target: selected.id)
+                try Files.write(session!, to: sessionURL)
+                layoutSession = session
                 try Files.write(captured, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json"))
                 layout = captured
             }
             var baseline = displays
-            if action == .connect, let saved = layout?.displays.first(where: { $0.id == selected.id }) {
+            if action == .connect, session == nil, let saved = layout?.displays.first(where: { $0.id == selected.id }) {
                 baseline = baseline.map { current in
                     guard current.id == selected.id else { return current }
                     var d = current; d.x = saved.x; d.y = saved.y; d.width = saved.width; d.height = saved.height; d.pixelWidth = saved.pixelWidth; d.pixelHeight = saved.pixelHeight; d.refresh = saved.refresh; d.rotation = saved.rotation; d.main = saved.main; return d
                 }
             }
+            if action == .disconnect { baseline = session!.original.displays }
+            if let session {
+                try session.validate(boot: currentBoot)
+                guard session.target == selected.id || action == .disconnect else { throw OmniError.message("请先连接上次断开的目标屏幕。") }
+            }
             let before = Snapshot(boot: registry?.boot ?? currentBoot, displays: baseline)
             var request = Request(operation: action, before: before, office: before, keep: retained, confirmedPhysical: physicalConfirmed, simulation: simulation, target: selected.id)
+            request.layoutSession = session
             if action == .disconnect && !simulation { request.liveConsent = try LiveTestConsent.grant(request: request, confirmedTarget: selected.id, riskAcknowledged: testRiskAcknowledged) }
             try launch(request)
             confirmation = nil; actionDisplay = nil
@@ -293,7 +343,7 @@ import OmniCore
         catch { self.error = error.localizedDescription }
     }
     private func tick() {
-        defer { onTransactionUIChange?() }
+        defer { retireRestoredSession(); onTransactionUIChange?() }
         now = Date(); if now.timeIntervalSince(lastRefresh) > 2 { refresh() }
         guard let journal else { return }
         if let next = try? Files.read(Receipt.self, from: journal.appendingPathComponent("receipt.json")) {

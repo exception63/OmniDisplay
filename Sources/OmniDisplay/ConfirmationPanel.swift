@@ -22,31 +22,34 @@ enum ConfirmationPlacement {
     private var host: NSHostingController<ConfirmationPanelView>?
     private var window: NSPanel?
     private var displayedNonce: String?
+    private var displayedAwaiting = false
     private var observer: NSObjectProtocol?
     private var lastPlacement: CGRect?
     init(model: AppModel) {
         self.model = model
         observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.model.awaitingDecision else { return }
+                guard let self, self.model.busy else { return }
                 self.position(reason: "screenParametersChanged") // no activation or focus change
             }
         }
     }
     func synchronize() {
-        guard model.awaitingDecision, let nonce = model.transactionRequest?.nonce else {
+        guard model.busy, let nonce = model.transactionRequest?.nonce else {
             if displayedNonce != nil {
                 window?.orderOut(nil); model.recordConfirmationUI("panelHidden")
-                displayedNonce = nil; lastPlacement = nil
+                displayedNonce = nil; lastPlacement = nil; displayedAwaiting = false
             }
             return
         }
-        guard displayedNonce != nonce else { return }
+        let enteringConfirmation = model.awaitingDecision && !displayedAwaiting
+        displayedAwaiting = model.awaitingDecision
+        guard displayedNonce != nonce || enteringConfirmation else { return }
         displayedNonce = nonce
-        show(reason: "enteredAwaitingConfirmation")
+        show(reason: enteringConfirmation ? "enteredAwaitingConfirmation" : "enteredExecution")
     }
     func reopen() {
-        guard model.awaitingDecision else { return }
+        guard model.busy else { return }
         show(reason: "userOpenedConfirmation")
     }
     private func show(reason: String) {
@@ -71,7 +74,7 @@ enum ConfirmationPlacement {
         window?.makeKeyAndOrderFront(nil)
         let nonce = model.transactionRequest?.nonce
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self, self.displayedNonce == nonce, self.model.awaitingDecision else { return }
+            guard let self, self.displayedNonce == nonce, self.model.busy else { return }
             self.recordVisibility(reason: reason)
         }
     }
@@ -91,7 +94,7 @@ enum ConfirmationPlacement {
             model.recordConfirmationUI("panelScreenUnavailable"); return
         }
         let frame = ConfirmationPlacement.frame(size: CGSize(width: 540, height: 342), visible: screens[index].visibleFrame)
-        guard frame != lastPlacement else { return }
+        guard frame != lastPlacement || window.frame != frame else { return }
         host?.view.setFrameSize(window.contentRect(forFrameRect: frame).size)
         window.setFrame(frame, display: true)
         host?.view.layoutSubtreeIfNeeded()
@@ -125,6 +128,13 @@ struct ConfirmationPanelView: View {
     @ObservedObject var model: AppModel
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            if !model.awaitingDecision {
+                HStack { ProgressView().controlSize(.small); Text(model.simulation ? "模拟 · 操作进度" : "正在处理屏幕操作").font(.title2.bold()) }
+                Text("目标：\(model.transactionTargetName)").foregroundStyle(.secondary)
+                Text(model.status).fixedSize(horizontal: false, vertical: true)
+                Text("布局核验通过后将显示45秒确认。失败或取消时尝试回连并恢复原排列。").font(.callout).foregroundStyle(.secondary)
+                Button("取消并尝试恢复") { model.cancel(source: "progressPanel") }.disabled(model.decisionPending)
+            } else {
             HStack(alignment: .top) {
                 Image(systemName: "display.badge.checkmark").font(.system(size: 30)).foregroundStyle(.blue)
                 VStack(alignment: .leading, spacing: 6) {
@@ -135,11 +145,12 @@ struct ConfirmationPanelView: View {
                 Text("\(model.countdown)秒").font(.system(size: 30, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(.orange)
                     .accessibilityIdentifier("confirmation.countdown")
             }
-            Text(model.transactionRequest?.operation == .disconnect ? "请检查主屏和其他保留屏幕：画面、排列与旋转都正常后，点击「保留断开」。" : "请检查保留屏幕的画面，正常后点击「保留更改」。")
+            Text(model.transactionRequest?.operation == .disconnect ? "请检查主屏和其他保留屏幕：画面与旋转正常、屏幕按预览临时靠拢后，点击「保留断开」。" : "请检查保留屏幕的画面，正常后点击「保留更改」。")
                 .font(.body).fixedSize(horizontal: false, vertical: true)
             Text(model.countdown > 0 ? "不操作将在倒计时结束后尝试恢复。\(model.simulation ? "本次不会改变实体显示器。" : "恢复无法保证处理硬件或系统故障。")" : "确认时间已结束，正在等待恢复结果…")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack { Spacer(); ConfirmationButtons(model: model, source: "confirmationPanel") }
+            }
         }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(.regularMaterial).tint(.blue)
     }
 }

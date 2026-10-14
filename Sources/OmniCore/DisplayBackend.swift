@@ -100,13 +100,17 @@ public final class CoreGraphicsBackend: DisplayBackend {
         }
         return warnings
     }
-    public func connect(_ target: String, from registry: Snapshot, preserveLayout: Bool = true) -> [String] {
+    public func connect(_ target: String, from registry: Snapshot, preserveLayout: Bool = true, session: LayoutSession? = nil) -> [String] {
+        if let session {
+            do { try session.validate(boot: Self.bootID) } catch { return [error.localizedDescription] }
+            guard session.target == target else { return ["连接目标与完整排列记录不一致。"] }
+        }
         guard registry.displays.contains(where: { $0.id == target }) else { return ["目标屏幕不在身份缓存中。"] }
         guard let current = try? list(), !current.contains(where: { $0.id == target && $0.active }) else { return ["目标已活动或当前身份无法读取，未发送连接/排列操作。"] }
-        guard LayoutGuard.peersUnchanged(before: registry.displays, current: current, target: target) else { return ["连接前其他屏幕已变化，拒绝使用过期快照。"] }
-        let messages = reconnectOnly(registry, target: target)
+        guard session?.peersMayRestore(current) ?? LayoutGuard.peersUnchanged(before: registry.displays, current: current, target: target) else { return ["连接前其他屏幕已变化，拒绝使用过期快照。"] }
+        let messages = reconnectOnly(session?.original ?? registry, target: target)
         for _ in 0..<10 {
-            if let live = try? list(), live.contains(where: { $0.id == target && $0.active }) { return preserveLayout ? restoreTargetLayout(target, from: registry, observed: live) : [] }
+            if let live = try? list(), live.contains(where: { $0.id == target && $0.active }) { return preserveLayout ? (session.map { restoreFullLayout($0, observed: live) } ?? restoreTargetLayout(target, from: registry, observed: live)) : [] }
             HelperEventLoop.wait(0.2)
         }
         return messages + ["未确认目标屏幕在线；检查视频线或手动拔插该屏的视频线，勿拔整个扩展坞。"]
@@ -149,6 +153,55 @@ public final class CoreGraphicsBackend: DisplayBackend {
             guard let final = try list().first(where: { $0.id == target }), final.x == saved.x, final.y == saved.y, abs(final.rotation-saved.rotation) < 0.1, final.width == saved.width, final.height == saved.height else { return ["目标屏幕已连接，但未确认排列完全保持。请在系统设置检查。"] }
             return []
         } catch { return [error.localizedDescription] }
+    }
+    /// Restore only a validated original/temporary session. Unknown concurrent
+    /// changes cause enable-only recovery; no peer is enabled or disabled here.
+    private func restoreFullLayout(_ session: LayoutSession, observed: [Display]) -> [String] {
+        do {
+            try session.validate(boot: Self.bootID)
+            if session.matchesOriginal(observed) { return [] }
+            try session.validateRestore(observed)
+            var current = observed
+            guard let saved = session.original.displays.first(where: { $0.id == session.target }),
+                  var target = current.first(where: { $0.id == session.target }) else { throw OmniError.message("恢复目标缺失。") }
+            guard DisconnectTopology.sameObservation(current, try list()) else { throw OmniError.message("恢复前出现并发调整。") }
+            if abs(target.rotation-saved.rotation) >= 0.1 {
+                guard Self.uuid(target.displayID) == saved.id, ODRotationAvailable() else { throw OmniError.message("目标旋转身份或接口不可用。") }
+                let peers = current.filter { $0.id != session.target }
+                try checkRotation(ODRotateDisplay(target.displayID, Int32(saved.rotation)))
+                current = try RotationWait.wait(target: saved.id, degrees: saved.rotation, timeout: 2.5, read: {
+                    let live = try self.list()
+                    guard TemporaryLayout.matches(peers, live.filter { $0.id != session.target }) else { throw OmniError.message("旋转期间其他屏幕变化，停止恢复排列。") }
+                    try session.validateRestore(live)
+                    return live
+                })
+                target = current.first(where: { $0.id == saved.id })!
+            }
+            try session.validateRestore(current)
+            let needsMode = target.width != saved.width || target.height != saved.height || target.pixelWidth != saved.pixelWidth || target.pixelHeight != saved.pixelHeight || abs(target.refresh-saved.refresh) >= 0.5
+            let mode = (CGDisplayCopyAllDisplayModes(target.displayID,nil) as? [CGDisplayMode] ?? []).first { $0.width == saved.width && $0.height == saved.height && $0.pixelWidth == saved.pixelWidth && $0.pixelHeight == saved.pixelHeight && abs($0.refreshRate-saved.refresh) < 0.5 }
+            guard !needsMode || mode != nil else { throw OmniError.message("原显示模式不可用，不使用替代模式。") }
+            try transaction { config in
+                guard Self.bootID == session.original.boot, DisconnectTopology.sameObservation(current, try list()) else { throw OmniError.message("完整排列提交前出现并发调整。") }
+                for original in session.original.displays {
+                    guard let live = current.first(where: { $0.id == original.id }), Self.uuid(live.displayID) == original.id,
+                          CGDisplayIsActive(live.displayID) != 0 else { throw OmniError.message("完整排列提交前身份变化。") }
+                    if original.id == saved.id, needsMode, let mode { try check(CGConfigureDisplayWithDisplayMode(config,live.displayID,mode,nil), "恢复目标原模式") }
+                    try check(CGConfigureDisplayOrigin(config,live.displayID,original.x,original.y), "恢复完整原排列")
+                }
+            }
+            // Two matching reads; never repeat a layout write to chase another actor.
+            var count = 0
+            for _ in 0..<12 {
+                count = session.matchesOriginal(try list()) ? count + 1 : 0
+                if count >= 2 { return [] }
+                HelperEventLoop.wait(0.1)
+            }
+            return ["目标已启用，但完整原排列未核实；请在系统设置检查，不重复断开。"]
+        } catch { return [error.localizedDescription] }
+    }
+    private func checkRotation(_ result: Int32) throws {
+        guard result == 0 else { throw OmniError.message("目标旋转请求失败（\(result)）。") }
     }
     public func disconnect(_ request: Request, mayProceed: () -> Bool = { true }, willMutate: () throws -> Void = {}, audit: (String) -> Void = { _ in }) throws -> InputWriteResult {
         try LiveTestConsent.validate(request)
@@ -243,7 +296,7 @@ public final class CoreGraphicsBackend: DisplayBackend {
         let messages = reconnectOnly(request.before, target: target)
         for _ in 0..<15 {
             if let current = try? list(), current.contains(where: { $0.id == target && $0.active }) {
-                let warnings = (request.preserveLayout ?? true) ? restoreTargetLayout(target, from: request.before, observed: current) : []
+                let warnings = (request.preserveLayout ?? true) ? (request.layoutSession.map { restoreFullLayout($0, observed: current) } ?? restoreTargetLayout(target, from: request.before, observed: current)) : []
                 return InputWriteResult(submitted: true, verified: warnings.isEmpty, message: warnings.isEmpty ? "目标已回连并核对原排列；应用窗口不搬回。" : "目标已回连；" + warnings.joined(separator: "；"))
             }
             HelperEventLoop.wait(0.2)

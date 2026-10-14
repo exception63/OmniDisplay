@@ -11,6 +11,12 @@ public enum DisconnectWriteChecks {
               UUID(uuidString: target.id) != nil, UUID(uuidString: retained.id) != nil,
               target.vendor != 0, target.model != 0,
               request.before.displays.filter({ $0.vendor == target.vendor && $0.model == target.model && $0.serial == target.serial }).count == 1 else { throw OmniError.message("主屏/内置屏受保护，或拓扑/恢复身份不唯一，拒绝断开。") }
+        if let session = request.layoutSession {
+            try session.validate(boot: boot)
+            guard session.target == targetID, session.original.displays == request.before.displays else {
+                throw OmniError.message("临时排列未绑定本次完整快照。")
+            }
+        }
         return (target,retained)
     }
 }

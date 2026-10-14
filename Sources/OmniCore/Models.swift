@@ -71,6 +71,7 @@ public struct Request: Codable, Sendable {
     public var inputToPort: String?
     public var inputPortMappings: [InputPortMapping]?
     public var liveConsent: LiveTestConsent?
+    public var layoutSession: LayoutSession?
     public var confirmedPhysical: Bool
     public var simulation: Bool
     public var timeout: Double

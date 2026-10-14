@@ -18,7 +18,7 @@ struct ManagerView: View {
                         Image(systemName: "display.2").font(.system(size: 32, weight: .light)).foregroundStyle(accent)
                         VStack(alignment: .leading, spacing: 5) {
                             Text("你的屏幕，随点随选。").font(.system(size: 28, weight: .semibold))
-                            Text("点击一块屏幕，连接或断开。屏幕排列保持，应用窗口由你整理。").font(.callout).foregroundStyle(.secondary)
+                            Text("点击一块屏幕，连接或断开。断开时临时靠拢，连接后恢复排列。").font(.callout).foregroundStyle(.secondary)
                         }
                     }
                     Spacer()
@@ -40,7 +40,7 @@ struct ManagerView: View {
                     ForEach(model.sortedDisplays) { d in DisplayRow(model: model, display: d, compact: false) }
                 }
                 VStack(alignment: .leading, spacing: 9) {
-                    Label("保持屏幕排列，不搬应用窗口", systemImage: "rectangle.on.rectangle").font(.callout.weight(.semibold))
+                    Label("保存完整排列，不搬应用窗口", systemImage: "rectangle.on.rectangle").font(.callout.weight(.semibold))
                     Text("连接时核对该屏原来的位置、旋转与显示模式；若检测到其他屏幕已被调整，会停止自动恢复并提示。应用窗口不会搬回原屏，断开时的窗口迁移由 macOS 和各 App 决定。").font(.caption).foregroundStyle(.secondary)
                     if !model.simulation {
                         Label("单次现场测试 · 主屏和最后一屏受保护", systemImage: "lock.shield").font(.caption).foregroundStyle(.orange)
@@ -134,8 +134,9 @@ struct ScreenActions: View {
                     Divider()
                     InputSourceControls(model: model, display: d)
                 } else if let action = model.confirmation {
-                    Text(action == .connect ? "只连接这块屏幕并核对原排列，不搬回应用窗口。" : "只断开这块屏幕，核对并恢复保留屏原来的排列和旋转；稳定后开始45秒确认。应用窗口由macOS处理。").font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Text(action == .connect ? "连接目标并恢复完整原排列，不搬应用窗口。" : "只断开所选屏幕；保留主屏、旋转及相对顺序，剩余屏幕可能临时靠拢。连接时恢复完整原排列；核验后开始45秒确认。").font(.callout).fixedSize(horizontal: false, vertical: true)
                     if action == .disconnect {
+                        Text(model.temporaryLayoutPreview(target: d.id)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Picker("保留实体屏幕",selection:$model.retained) { ForEach(model.displays.filter { $0.active && $0.id != d.id }) { peer in Text(peer.label).tag(peer.id) } }
                         Toggle("确认保留的是活动实体屏幕",isOn:$model.physicalConfirmed).font(.caption)
                         if !model.simulation {

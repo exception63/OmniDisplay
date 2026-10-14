@@ -3,7 +3,7 @@ import Foundation
 /// Only active peers matter after a disconnect. An absent target is expected;
 /// neither its missing UUID nor a display's localized name is a topology change.
 public enum DisconnectTopology {
-    public static func peers(_ request: Request) -> [Display] { request.before.displays.filter { $0.active && $0.id != request.target } }
+    public static func peers(_ request: Request) -> [Display] { request.layoutSession?.temporary.displays ?? request.before.displays.filter { $0.active && $0.id != request.target } }
     public static func validateIdentities(_ request: Request, current: [Display]) throws {
         let expected = peers(request)
         guard !current.isEmpty, Set(current.map(\.id)).count == current.count,
@@ -30,6 +30,7 @@ public enum DisconnectTopology {
         }
     }
     public static func matches(_ request: Request, current: [Display]) -> Bool {
+        if let session = request.layoutSession { return session.matchesTemporary(current) }
         guard (try? validateIdentities(request, current: current)) != nil,
               let anchor = peers(request).first(where: \.main),
               let origin = current.first(where: { $0.id == anchor.id }) else { return false }

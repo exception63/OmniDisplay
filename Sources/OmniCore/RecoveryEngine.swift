@@ -127,11 +127,21 @@ public enum RecoveryEngine {
         if request.operation == .connect || request.operation == .disconnect {
             if request.operation == .disconnect && !request.confirmedPhysical { throw OmniError.message("未确认实体保留屏幕，拒绝断开。") }
             guard let target = request.target else { throw OmniError.message("缺少目标屏幕。") }
+            if let session = request.layoutSession {
+                try session.validate(boot: request.simulation ? "simulation" : CoreGraphicsBackend.bootID)
+                guard session.target == target else { throw OmniError.message("排列记录与操作目标不一致。") }
+                if request.operation == .disconnect, session.original.displays != request.before.displays { throw OmniError.message("完整快照与断开请求不一致。") }
+            }
             let plan = try SingleDisplayPlan.make(action: request.operation, target: target, displays: request.before.displays, retainedPhysical: request.keep)
             if request.operation == .connect {
                 try status(Receipt(.applying, "正在连接目标屏幕…"))
-                let warnings = backend?.connect(target, from: request.before, preserveLayout: request.preserveLayout ?? true) ?? []
-                if request.simulation { try Files.write(plan.simulatedResult(), to: directory.appendingPathComponent("simulated-displays.json")) }
+                let warnings = backend?.connect(target, from: request.before, preserveLayout: request.preserveLayout ?? true, session: request.layoutSession) ?? []
+                if request.simulation {
+                    if let session = request.layoutSession {
+                        guard session.peersMayRestore(request.before.displays.filter(\.active)) else { throw OmniError.message("模拟连接前排列已变化。") }
+                        try Files.write(session.simulatedRestore(request.before.displays), to: directory.appendingPathComponent("simulated-displays.json"))
+                    } else { try Files.write(plan.simulatedResult(), to: directory.appendingPathComponent("simulated-displays.json")) }
+                }
                 try status(Receipt(warnings.isEmpty ? .restored : .failed, warnings.isEmpty ? "目标屏幕已连接，已核对屏幕排列；应用窗口不搬回。" : warnings.joined(separator: "；")))
                 return
             }
@@ -169,15 +179,19 @@ public enum RecoveryEngine {
             // Simulation follows the same target-only cancel/timeout semantics.
             let deadline = Date().addingTimeInterval(request.timeout)
             let expiry = ProcessInfo.processInfo.systemUptime + request.timeout
-            try Files.write(plan.simulatedResult(), to: directory.appendingPathComponent("simulated-displays.json"))
+            try Files.write(request.layoutSession?.simulatedDisconnected() ?? plan.simulatedResult(), to: directory.appendingPathComponent("simulated-displays.json"))
             try status(Receipt(.awaitingConfirmation, "模拟断开完成；未确认则只重新连接这块屏幕。", deadline: deadline))
             while true {
-                if exists("cancel") || Date() >= deadline || ProcessInfo.processInfo.systemUptime >= expiry {
+                let stateURL = directory.appendingPathComponent("simulated-displays.json")
+                let state = try Files.read([Display].self, from: stateURL)
+                let changed = request.layoutSession.map { !$0.matchesTemporary(state.filter(\.active)) } ?? false
+                if changed || exists("cancel") || Date() >= deadline || ProcessInfo.processInfo.systemUptime >= expiry {
                     let stateURL = directory.appendingPathComponent("simulated-displays.json")
                     let current = try Files.read([Display].self, from: stateURL)
-                    let recovered = try TargetRecovery.simulated(before: request.before.displays, current: current, target: target)
+                    let recovered = try request.layoutSession?.simulatedRestore(current) ?? TargetRecovery.simulated(before: request.before.displays, current: current, target: target)
                     try Files.write(recovered, to: stateURL)
-                    try status(Receipt(.restored, "已取消模拟断开，目标屏幕重新连接。")); return
+                    let complete = request.layoutSession?.matchesOriginal(recovered.filter(\.active)) ?? true
+                    try status(Receipt(complete ? .restored : .failed, complete ? "已取消模拟断开，已恢复完整原排列。" : "已启用模拟目标；其他屏幕有并发变化，未覆盖排列。")); return
                 }
                 if exists("confirm") { try status(Receipt(.confirmed, "模拟断开已确认。")); return }
                 HelperEventLoop.wait(0.1)
