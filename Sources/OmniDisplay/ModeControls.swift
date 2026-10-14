@@ -16,7 +16,7 @@ struct ModeControls: View {
                 Button { model.prepareMode(.officeMode) } label:{ Label("办公室",systemImage:"display.2") }
                 Button { model.prepareMode(.remoteMode) } label:{ Label("远程单屏",systemImage:"display") }
             }.buttonStyle(.bordered).disabled(model.busy || model.probingInput != nil)
-            if !compact { Text("完整排列单独保存；模式失败或未确认会尝试恢复切换前状态。输入源独立控制。").font(.caption).foregroundStyle(.secondary) }
+            if !compact { Text("完整排列单独保存；远程失败回退入口，办公室恢复不会重新关闭已连接屏幕。输入源独立控制。").font(.caption).foregroundStyle(.secondary) }
         }
     }
 }
@@ -37,7 +37,7 @@ struct ModeReview: View {
                     }
                 }
             }.frame(maxHeight:180)
-            Text((r.operation == .remoteMode ? "先确认保留屏已启用，再逐块断开其他屏幕。" : "逐块连接管理屏幕，恢复办公室完整排列、旋转与主屏。") + "切换期间排列可能变化，应用窗口不搬回。完成后45秒未确认，将恢复本次切换前状态。").font(.callout)
+            Text((r.operation == .remoteMode ? "先确认保留屏已启用，再逐块断开其他屏幕。" : "逐块连接管理屏幕，恢复办公室完整排列、旋转与主屏。") + (r.operation == .officeMode ? "排列可能变化，应用窗口不搬回。失败时保留已连接屏幕并报告尚未恢复的项目；取消或45秒未确认也不会重新断屏。" : "切换期间排列可能变化，应用窗口不搬回。完成后45秒未确认，将恢复本次切换前状态。")).font(.callout)
             if !model.simulation { Text("悠悠可能短断。须能通过显示器实体OSD选回Mac，并单独重新插拔视频线；软件恢复不能保证硬件/WindowServer故障。").font(.caption).foregroundStyle(.secondary) }
             Toggle(model.simulation ? "确认仅执行模拟" : "我在现场，保留屏可见，并能手动恢复受影响屏幕",isOn:$physical)
             HStack { Button("取消") { model.modePreview=nil };Spacer();Button(model.simulation ? "模拟切换" : "确认本次模式切换") { model.executeMode(preview,confirmed:physical) }.buttonStyle(.borderedProminent).disabled(!physical || model.busy) }

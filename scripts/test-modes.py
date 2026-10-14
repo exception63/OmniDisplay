@@ -22,9 +22,13 @@ def done(p,success=True):
     p.wait(timeout=10);err=p.stderr.read().decode()
     assert (p.returncode==0)==success,err
     if success:assert not err,err
-def setup(base,operation='remoteMode',entry=None,keep=0,timeout=.6):
+def setup(base,operation='remoteMode',entry=None,keep=0,timeout=.6,geometry=False):
     d=base/str(uuid.uuid4());d.mkdir()
     screens=[dict(id=f'00000000-0000-4000-8000-{i+1:012d}',displayID=i+1,name=f'Example {i}',active=True,main=i==0,builtin=False,mirrored=False,vendor=610,model=1,serial=i,x=i*1920,y=0,width=1920,height=1080,pixelWidth=3840,pixelHeight=2160,refresh=60,rotation=0) for i in range(4)]
+    if geometry:
+        screens[1].update(x=3000,y=-104)
+        screens[2].update(x=1920,y=-535,width=1080,height=1920,pixelWidth=2160,pixelHeight=3840,rotation=270)
+        screens[3].update(x=-1080,y=-461,width=1080,height=1920,pixelWidth=2160,pixelHeight=3840,rotation=270)
     office=dict(version=1,date=0,boot='simulation',displays=screens)
     before=copy.deepcopy(office)
     if entry is not None:
@@ -43,7 +47,17 @@ with tempfile.TemporaryDirectory(prefix='omni-modes-') as tmp:
     d,r=setup(base,'officeMode',entry=2,timeout=3);p=start(d);wait(d,['awaitingConfirmation']);(d/'confirm').touch();wait(d,['confirmed']);done(p)
     assert read(d/'simulated-displays.json')==r['office']['displays'];results.append('PASS office restores full saved layout and primary')
     d,r=setup(base,'officeMode',entry=2,timeout=3);p=start(d);wait(d,['awaitingConfirmation']);(d/'cancel').touch();wait(d,['restored']);done(p)
-    assert read(d/'simulated-displays.json')==r['before']['displays'];results.append('PASS cancelling office returns to its single-screen entry')
+    assert read(d/'simulated-displays.json')==r['office']['displays'];results.append('PASS cancelling office keeps every connected screen instead of returning to single-screen')
+    for failing_step in [1,3]:
+        d,r=setup(base,'officeMode',entry=0,geometry=True);(d/f'simulation-fail-step-{failing_step}').touch();p=start(d);wait(d,['failed']);done(p)
+        state=read(d/'simulated-displays.json');assert {x['id'] for x in state}=={x['id'] for x in r['office']['displays']}
+        trace=read(d/'simulated-mode-work.json');assert not any((w.get('step') or {}).get('action')=='disable' for w in trace)
+        assert '已连接屏幕保持启用' in read(d/'receipt.json')['message']
+        results.append(f'PASS office failure at step {failing_step} preserves enabled screens and reports incomplete layout')
+    d,r=setup(base,'officeMode',entry=0);p=start(d);wait(d,['restored']);done(p)
+    assert read(d/'simulated-displays.json')==r['office']['displays'];results.append('PASS office confirmation timeout never disables restored screens')
+    d,r=setup(base,'officeMode',entry=0,timeout=3);p=start(d);wait(d,['awaitingConfirmation']);state=read(d/'simulated-displays.json');state[1]['y']=99;(d/'simulated-displays.json').write_text(json.dumps(state));wait(d,['failed']);done(p)
+    assert read(d/'simulated-displays.json')==state;results.append('PASS office manual geometry changes remain untouched and all screens stay enabled')
     d,r=setup(base);(d/'simulation-fail-step-1').touch();p=start(d);wait(d,['restored']);done(p)
     assert read(d/'simulated-displays.json')==r['before']['displays'];results.append('PASS mid-apply failure rolls back completed steps')
     d,r=setup(base);(d/'simulation-fail-step-1').touch();(d/'simulation-fail-rollback').touch();p=start(d);wait(d,['failed']);done(p)

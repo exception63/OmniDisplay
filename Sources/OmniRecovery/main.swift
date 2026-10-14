@@ -24,7 +24,7 @@ if arguments.count == 2 && arguments[1] == "--inspect-fresh" {
         let report = try FreshDisplayObserver.collect(nonce: arguments[2], journal: journal)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         print(String(decoding: try encoder.encode(report), as: UTF8.self))
-    } catch { journal?.record("observerFailed", AuditDetail(error.localizedDescription)); fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+    } catch { journal?.record("observerFailed", AuditDetail(error.localizedDescription)); fputs("\(error.localizedDescription)\n", stderr); exit(error is ObservationNotSettled ? 75 : 1) }
 } else if arguments.contains("--inspect") {
     do {
         let backend = CoreGraphicsBackend()

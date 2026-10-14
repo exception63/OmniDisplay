@@ -4,7 +4,7 @@ import json,subprocess,time,uuid,tempfile
 root=Path(__file__).resolve().parents[1]
 temporary=tempfile.TemporaryDirectory(prefix='omni-audit-tests-')
 base=Path(temporary.name)
-helper=root/'dist/OmniDisplay.app/Contents/Helpers/OmniRecovery'
+helper=root/'dist.noindex/OmniDisplay.app/Contents/Helpers/OmniRecovery'
 fixture=json.loads((root/'Tests/OmniCoreTests/Fixtures/disconnect-replay-before.json').read_text())
 for blocked in [False,True]:
  r=dict(fixture);r['nonce']=str(uuid.uuid4());r['simulation']=True;r['timeout']=.5;r.pop('liveConsent',None)

@@ -3,6 +3,13 @@ import CoreGraphics
 import AppKit
 import Darwin
 
+/// Exit code 75 marks only an observer that exhausted its local settle window.
+/// Identity, transport, decoding and cancellation errors remain fatal.
+public struct ObservationNotSettled: LocalizedError {
+    public init() {}
+    public var errorDescription: String? { "独立只读观察期间仍在重配，未获得一致快照。" }
+}
+
 /// Receipt from a newly exec'd read-only observer, never the mutation process's CG cache.
 public struct DisplayObservation: Codable {
     public var nonce: String
@@ -127,7 +134,7 @@ public enum DisplayObservationCollector {
             if !inTime { break }
             pause(0.03)
         }
-        throw OmniError.message("独立只读观察期间仍在重配，未获得一致快照。")
+        throw ObservationNotSettled()
     }
 }
 
@@ -181,6 +188,7 @@ public enum FreshDisplayObserver {
             }
             journal?.record("observerExited", AuditDetail("", ["childPID": String(child.processIdentifier), "terminationStatus": String(child.terminationStatus), "terminationReason": String(describing: child.terminationReason)]))
             let size = ((try FileManager.default.attributesOfItem(atPath: output.path)[.size]) as? NSNumber)?.intValue ?? Int.max
+            if !cancelled(), child.terminationStatus == 75 { throw ObservationNotSettled() }
             guard !cancelled(), child.terminationStatus == 0, size <= 262144 else {
                 throw OmniError.message("独立只读观察失败，未采用旧进程读数。")
             }

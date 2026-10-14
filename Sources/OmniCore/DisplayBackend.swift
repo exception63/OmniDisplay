@@ -346,6 +346,9 @@ extension CoreGraphicsBackend {
     /// the sole confirmation deadline. Old batch applyRemote stays disabled.
     public func applyModeStep(_ step: ModeStep, request: Request, restoring: Bool, mayProceed: () -> Bool) throws -> [Display] {
         try LiveTestConsent.validate(request,restoring:restoring)
+        guard request.operation != .officeMode || step.action != .disable else {
+            throw OmniError.message("办公室恢复禁止关闭已连接屏幕。")
+        }
         guard request.before.boot == Self.bootID, let enable else { throw OmniError.message("模式会话或接口失效。") }
         let observed=try list()
         guard mayProceed(), TemporaryLayout.matches(step.before,observed), ModePlan.identities(observed,within:request.office.displays) else { throw OmniError.message("模式步骤前出现并发显示调整。") }
@@ -365,22 +368,8 @@ extension CoreGraphicsBackend {
             }
         }
         func stable(matching:Bool) throws -> [Display] {
-            let end=ProcessInfo.processInfo.systemUptime+2.5
-            var previous:[Display]?
-            while ProcessInfo.processInfo.systemUptime < end {
-                guard mayProceed() else { throw OmniError.message("模式步骤已取消或过期。") }
-                let live=try list()
-                guard ModePlan.identities(live,within:request.office.displays), Set(live.map(\.id))==Set(step.after.map(\.id)) else {
-                    // Expected enable/disable enumeration may take a moment; a new
-                    // unknown screen or missing retained primary is never accepted.
-                    guard ModePlan.identities(live,within:request.office.displays), live.contains(where:{$0.id==step.after.first(where:\.main)?.id}) || step.action == .enable else { throw OmniError.message("模式执行期间出现未知屏幕或保留屏丢失。") }
-                    HelperEventLoop.wait(0.1);continue
-                }
-                if ProcessInfo.processInfo.systemUptime >= end { break }
-                if let previous, DisconnectTopology.sameObservation(previous,live), !matching || TemporaryLayout.matches(step.after,live) { return live }
-                previous=live;HelperEventLoop.wait(0.1)
-            }
-            throw OmniError.message("模式步骤的活动状态/完整排列未及时稳定。")
+            try ModeStability.wait(expected: step.after, office: request.office.displays,
+                matching: matching, enabling: step.action == .enable, mayProceed: mayProceed, read: { try list() })
         }
         var current=try stable(matching:false)
         for saved in step.after {

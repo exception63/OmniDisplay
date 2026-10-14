@@ -77,3 +77,5 @@ open "dist.noindex/OmniDisplay Simulation.app" --args --demo 4 --data-dir "$PWD/
 沿用项目现有 MIT 许可证，公开署名为 GitHub 账号 `exception63`。aspace、displayplacer、m1ddc 的静态参考及原始许可证列于 [第三方说明](THIRD_PARTY_NOTICES.md)，构建时随 App 打包。未运行下载的上游程序，未复制 GPL 源码。
 
 0.5.1修复正式版误把同身份模拟进程当成已有实例而退出的问题。构建产物放入`dist.noindex/`，避免被Spotlight作为日常入口收录；日常使用`/Applications/OmniDisplay.app`。历史备份应保存在不索引目录，不能用模拟窗口作为正式启动验收。
+
+0.5.2修复办公室恢复时暂态观察失败导致重新断屏的问题。办公室失败、取消或未确认均保留已连接屏幕；远程模式仍回退本次入口。旧0.5.1现场办公室失败已记录，0.5.2尚待用户现场验收。

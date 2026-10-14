@@ -9,6 +9,7 @@ public struct ModeWork: Codable {
     public var rollbackFrom: [Display]?
     public var index: Int
 }
+public struct ModeStepFailure: Codable { public var nonce: String; public var message: String }
 public enum ModeEngine {
     public static func run(request:Request,directory:URL,status:(Receipt)throws->Void) throws {
         let plan=try ModePlan.make(request)
@@ -25,6 +26,9 @@ public enum ModeEngine {
         var sequence=0
         func execute(_ work:ModeWork) throws {
             if request.simulation {
+                let traceURL=directory.appendingPathComponent("simulated-mode-work.json")
+                var trace=(try? Files.read([ModeWork].self,from:traceURL)) ?? []
+                trace.append(work);try Files.write(trace,to:traceURL)
                 let live=try read()
                 if let step=work.step {
                     guard TemporaryLayout.matches(step.before,live) else { throw OmniError.message("模拟模式并发变化。") }
@@ -32,15 +36,44 @@ public enum ModeEngine {
                     try Files.write(step.after,to:simulated)
                 } else if let target=work.rescue {
                     if exists("simulation-fail-rollback") { throw OmniError.message("模拟回滚失败。") }
-                    if !live.contains(where:{$0.id==target}), var saved=request.before.displays.first(where:{$0.id==target}) { saved.main=false;try Files.write(live+[saved],to:simulated) }
+                    if !live.contains(where:{$0.id==target}), var saved=(request.operation == .officeMode ? request.office : request.before).displays.first(where:{$0.id==target}) { saved.main=false;try Files.write(live+[saved],to:simulated) }
                 }
                 HelperEventLoop.wait(0.05);return
             }
             let file="mode-work-\(sequence).json";sequence+=1
             try Files.write(work,to:directory.appendingPathComponent(file))
-            try BoundedChild.run(executable:URL(fileURLWithPath:CommandLine.arguments[0]),arguments:["--mode-step",directory.path,file],timeout:10,cancelled:{ !work.restoring && exists("cancel") })
+            do {
+                try BoundedChild.run(executable:URL(fileURLWithPath:CommandLine.arguments[0]),arguments:["--mode-step",directory.path,file],timeout:10,cancelled:{ !work.restoring && exists("cancel") })
+            } catch {
+                if let failure = try? Files.read(ModeStepFailure.self, from: directory.appendingPathComponent(file + ".result.json")), failure.nonce == request.nonce {
+                    throw OmniError.message(failure.message)
+                }
+                throw error
+            }
+        }
+        func preserveOffice(_ reason: String, completeMissing: Bool) {
+            try? status(Receipt(.restoring, reason + " 办公室恢复只连接屏幕，不退回单屏。"))
+            var failures: [String] = []
+            if completeMissing {
+                for d in request.office.displays {
+                    do {
+                        let current = try read()
+                        if current.contains(where: { $0.id == d.id }) { continue }
+                        try? status(Receipt(.restoring, "补连 \(d.name)；已连接屏幕保持启用。"))
+                        try execute(ModeWork(step: nil, rescue: d.id, restoring: true, rollbackFrom: nil, index: 0))
+                    } catch { failures.append(d.name + "：" + error.localizedDescription) }
+                }
+            }
+            do {
+                let current = try read()
+                let missing = request.office.displays.filter { saved in !current.contains { $0.id == saved.id } }
+                let complete = TemporaryLayout.matches(request.office.displays, current)
+                let detail = missing.isEmpty ? "管理屏幕均已连接；原排列尚未完全核验。" : "仍未连接：" + missing.map(\.name).joined(separator: "、") + "。"
+                try status(Receipt(complete ? .restored : .failed, complete ? reason + " 办公室完整排列已核验，已连接屏幕保持启用。" : reason + " 部分恢复：" + detail + "已连接屏幕保持启用，不会再次断开。请核对画面；未覆盖未知布局。" + failures.joined(separator: "；")))
+            } catch { try? status(Receipt(.failed, reason + " 已停止进一步排列，未关闭已连接屏幕。当前状态未能读取，请用实体OSD/单独视频线检查。")) }
         }
         func rollback(_ reason:String) {
+            if request.operation == .officeMode { preserveOffice(reason, completeMissing: !exists("cancel")); return }
             try? status(Receipt(.restoring,reason+" 正在恢复本次切换前状态。"))
             do {
                 let current=try read()
@@ -65,13 +98,14 @@ public enum ModeEngine {
             let applyEnd=ProcessInfo.processInfo.systemUptime+90, applyDate=Date().addingTimeInterval(90)
             for (i,step) in plan.steps.enumerated() {
                 guard !exists("cancel"), ProcessInfo.processInfo.systemUptime < applyEnd, Date() < applyDate else { throw OmniError.message("模式切换取消或过期。") }
-                try status(Receipt(.applying,"模式步骤 \(i+1)/\(plan.steps.count)：\(step.action == .enable ? "连接" : step.action == .disable ? "断开" : "恢复排列")"))
+                let targetName = request.office.displays.first { $0.id == step.target }?.name ?? "完整办公室排列"
+                try status(Receipt(.applying,"模式步骤 \(i+1)/\(plan.steps.count)：\(step.action == .enable ? "连接" : step.action == .disable ? "断开" : "恢复排列") · \(targetName)；目标 \(step.after.count)/\(request.office.displays.count) 屏活动"))
                 try execute(ModeWork(step:step,rescue:nil,restoring:false,rollbackFrom:nil,index:i))
                 guard TemporaryLayout.matches(step.after,try read()) else { throw OmniError.message("模式步骤核验失败。") }
                 try Files.write(Snapshot(boot:request.before.boot,displays:try read()),to:directory.appendingPathComponent("mode-checkpoint.json"))
             }
             let deadline=Date().addingTimeInterval(request.timeout),end=ProcessInfo.processInfo.systemUptime+request.timeout
-            try status(Receipt(.awaitingConfirmation,"模式已核验；请确认保留屏画面，未确认恢复本次入口状态。",deadline:deadline))
+            try status(Receipt(.awaitingConfirmation,request.operation == .officeMode ? "办公室已核验；请检查全部屏幕。未确认或取消都不会关闭已连接屏幕。" : "模式已核验；请确认保留屏画面，未确认恢复本次入口状态。",deadline:deadline))
             while true {
                 if exists("cancel") || Date()>=deadline || ProcessInfo.processInfo.systemUptime>=end { rollback("已取消或确认倒计时结束。");return }
                 guard TemporaryLayout.matches(plan.desired,try read()) else { throw OmniError.message("确认期间屏幕状态变化。") }
@@ -81,6 +115,18 @@ public enum ModeEngine {
         } catch { rollback(error.localizedDescription) }
     }
     public static func worker(directory:URL,file:String) throws {
+        guard file.hasPrefix("mode-work-"), file.hasSuffix(".json"), !file.contains("/"), !file.contains("..") else { throw OmniError.message("模式步骤路径无效。") }
+        do { try performWorker(directory: directory, file: file) }
+        catch {
+            try? Files.write(ModeStepFailure(nonce: directory.lastPathComponent, message: error.localizedDescription), to: directory.appendingPathComponent(file + ".result.json"))
+            let restoring = (try? Files.read(ModeWork.self, from: directory.appendingPathComponent(file)))?.restoring == true
+            if let audit = try? TransactionAudit(directory: directory, nonce: directory.lastPathComponent, phase: restoring ? "restore" : "apply", role: "worker") {
+                audit.record("modeStepFailed", AuditDetail(error.localizedDescription, ["file": file]))
+            }
+            throw error
+        }
+    }
+    private static func performWorker(directory:URL,file:String) throws {
         guard file.hasPrefix("mode-work-"), file.hasSuffix(".json"), !file.contains("/"), !file.contains("..") else { throw OmniError.message("模式步骤路径无效。") }
         let request=try Files.read(Request.self,from:directory.appendingPathComponent("request.json"))
         let work=try Files.read(ModeWork.self,from:directory.appendingPathComponent(file))
@@ -102,12 +148,13 @@ public enum ModeEngine {
         defer { diagnostics?.record("modeStepFinished",work) }
         let backend=CoreGraphicsBackend(freshRead:{try FreshDisplayObserver.read(cancelled:{!proceed()},journal:diagnostics)},diagnostics:diagnostics)
         if let rescue=work.rescue {
-            guard work.restoring, work.step==nil, request.before.displays.contains(where:{$0.id==rescue}) else { throw OmniError.message("救援范围无效。") }
+            guard work.restoring, work.step==nil, (request.operation == .officeMode ? request.office : request.before).displays.contains(where:{$0.id==rescue}) else { throw OmniError.message("救援范围无效。") }
             _ = backend.reconnectOnly(request.office,target:rescue);return
         }
         guard let step=work.step, work.index>=0 else { throw OmniError.message("模式步骤缺失。") }
         let allowed:[ModeStep]
         if work.restoring {
+            guard request.operation != .officeMode else { throw OmniError.message("办公室恢复不允许回滚禁用计划。") }
             guard let from=work.rollbackFrom, plan.recognizes(from,entry:request.before.displays) else { throw OmniError.message("回滚入口不属于本次事务。") }
             allowed=try ModePlan.transition(from:from,to:request.before.displays,office:request.office.displays).steps
         } else { allowed=plan.steps }

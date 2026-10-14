@@ -115,7 +115,7 @@ struct ConfirmationButtons: View {
     let source: String
     var body: some View {
         HStack(spacing: 12) {
-            Button("立即恢复") { model.cancel(source: source) }.controlSize(.large)
+            Button(model.transactionRequest?.operation == .officeMode ? "结束检查，保持连接" : "立即恢复") { model.cancel(source: source) }.controlSize(.large)
                 .accessibilityIdentifier("confirmation.restore")
             Button(model.decisionPending ? "正在处理…" : model.keepButtonTitle) { model.confirm(source: source) }
                 .buttonStyle(.borderedProminent).controlSize(.large)
@@ -132,8 +132,8 @@ struct ConfirmationPanelView: View {
                 HStack { ProgressView().controlSize(.small); Text(model.simulation ? "模拟 · 操作进度" : "正在处理屏幕操作").font(.title2.bold()) }
                 Text("目标：\(model.transactionTargetName)").foregroundStyle(.secondary)
                 Text(model.status).fixedSize(horizontal: false, vertical: true)
-                Text("布局核验通过后将显示45秒确认。失败或取消时尝试回连并恢复切换前状态。").font(.callout).foregroundStyle(.secondary)
-                Button("取消并尝试恢复") { model.cancel(source: "progressPanel") }.disabled(model.decisionPending)
+                Text(model.transactionRequest?.operation == .officeMode ? "正在逐屏连接并核对原排列；失败或取消时保留已连接屏幕，不退回单屏。" : "布局核验通过后将显示45秒确认。失败或取消时尝试回连并恢复切换前状态。").font(.callout).foregroundStyle(.secondary)
+                Button(model.transactionRequest?.operation == .officeMode ? "停止并保留已连接屏幕" : "取消并尝试恢复") { model.cancel(source: "progressPanel") }.disabled(model.decisionPending)
             } else {
             HStack(alignment: .top) {
                 Image(systemName: "display.badge.checkmark").font(.system(size: 30)).foregroundStyle(.blue)
@@ -147,7 +147,7 @@ struct ConfirmationPanelView: View {
             }
             Text(model.transactionRequest?.operation == .disconnect ? "请检查主屏和其他保留屏幕：画面与旋转正常、屏幕按预览临时靠拢后，点击「保留断开」。" : "请检查保留屏幕的画面，正常后点击「\(model.keepButtonTitle)」。")
                 .font(.body).fixedSize(horizontal: false, vertical: true)
-            Text(model.countdown > 0 ? "不操作将在倒计时结束后尝试恢复。\(model.simulation ? "本次不会改变实体显示器。" : "恢复无法保证处理硬件或系统故障。")" : "确认时间已结束，正在等待恢复结果…")
+            Text(model.transactionRequest?.operation == .officeMode ? "取消或倒计时结束不会关闭已连接屏幕；请核对全部画面及排列。" : model.countdown > 0 ? "不操作将在倒计时结束后尝试恢复。\(model.simulation ? "本次不会改变实体显示器。" : "恢复无法保证处理硬件或系统故障。")" : "确认时间已结束，正在等待恢复结果…")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack { Spacer(); ConfirmationButtons(model: model, source: "confirmationPanel") }
             }
@@ -160,14 +160,14 @@ struct TransactionBanner: View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(model.awaitingDecision ? "待确认 · \(model.transactionTargetName) · \(model.countdown)秒" : model.status).font(.headline).monospacedDigit()
-                Text(model.awaitingDecision ? "检查保留屏幕的画面；不操作会尝试恢复。" : "操作期间请保留此窗口。确认面板将在核验通过后出现。")
+                Text(model.transactionRequest?.operation == .officeMode ? "核对全部屏幕；未确认或取消都不会再次断屏。" : model.awaitingDecision ? "检查保留屏幕的画面；不操作会尝试恢复。" : "操作期间请保留此窗口。确认面板将在核验通过后出现。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if model.awaitingDecision {
                 Button("打开确认") { model.onShowConfirmation?() }
                 ConfirmationButtons(model: model, source: "managerBanner")
-            } else { Button("立即恢复") { model.cancel(source: "managerBanner") } }
+            } else { Button(model.transactionRequest?.operation == .officeMode ? "结束检查，保持连接" : "立即恢复") { model.cancel(source: "managerBanner") } }
         }
     }
 }

@@ -228,7 +228,7 @@ struct MenuPanel: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
             } else if model.busy {
                 Text(model.status).font(.caption)
-                Button("立即恢复") { model.cancel(source: "menuBar") }
+                Button(model.transactionRequest?.operation == .officeMode ? "停止并保留已连接屏幕" : "立即恢复") { model.cancel(source: "menuBar") }
             }
             ScrollView {
                 VStack(spacing:7) {
