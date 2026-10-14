@@ -102,6 +102,16 @@ final class FreshDisplayObservationTests: XCTestCase {
             XCTAssertThrowsError(try FreshDisplayObserver.read(executable: file))
         }
     }
+    func testFinalReadBudgetCapsTransportAndRejectsInvalidBudget() throws {
+        let file = try fixture("exec /bin/sleep 5")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let start = ProcessInfo.processInfo.systemUptime
+        XCTAssertThrowsError(try FreshDisplayObserver.read(executable: file, timeout: 0.06))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.5)
+        for budget in [0.0, -1, Double.infinity, Double.nan, 1.3] {
+            XCTAssertThrowsError(try FreshDisplayObserver.read(executable: file, timeout: budget))
+        }
+    }
     func testObserverProcessTimeoutAndCancellationAreBounded() throws {
         let file = try fixture("exec /bin/sleep 5")
         defer { try? FileManager.default.removeItem(at: file) }

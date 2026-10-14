@@ -58,6 +58,32 @@ with tempfile.TemporaryDirectory(prefix='omni-modes-') as tmp:
     assert read(d/'simulated-displays.json')==r['office']['displays'];results.append('PASS office confirmation timeout never disables restored screens')
     d,r=setup(base,'officeMode',entry=0,timeout=3);p=start(d);wait(d,['awaitingConfirmation']);state=read(d/'simulated-displays.json');state[1]['y']=99;(d/'simulated-displays.json').write_text(json.dumps(state));wait(d,['failed']);done(p)
     assert read(d/'simulated-displays.json')==state;results.append('PASS office manual geometry changes remain untouched and all screens stay enabled')
+    # A committed final arrangement times out verification. The owner must only
+    # read twice; no new work item, disable, confirmation or retry is allowed.
+    for operation in ['remoteMode','officeMode']:
+        for outcome in ['success','unstable','identity','layout','boot']:
+            d,r=setup(base,operation,entry=0 if operation=='officeMode' else None,geometry=True,timeout=3)
+            (d/('simulation-postcommit-apply' if operation=='officeMode' else 'simulation-postcommit-rollback')).touch()
+            if outcome!='success':(d/('simulation-final-'+outcome)).touch()
+            started=time.monotonic();p=start(d)
+            if operation=='remoteMode':wait(d,['awaitingConfirmation']);(d/'cancel').touch()
+            result=wait(d,['restored' if outcome=='success' else 'failed']);done(p)
+            assert time.monotonic()-started<8
+            trace=read(d/'simulated-mode-work.json')
+            assert len(trace)==(4 if operation=='officeMode' else 7),trace
+            restoring=trace if operation=='officeMode' else [w for w in trace if w['restoring']]
+            assert [w['step']['action'] for w in restoring]==['enable','enable','enable','arrange']
+            assert read(d/'simulated-displays.json')==r['office']['displays']
+            events=[json.loads(line) for f in (d/'audit/restore').glob('*.jsonl') for line in f.read_text().splitlines()]
+            assert sum(e['event']=='finalVerificationStarted' for e in events)==1
+            assert sum(e['event']=='finalVerificationSucceeded' for e in events)==(outcome=='success')
+            if outcome=='success':
+                assert read(d/'simulated-final-read-count.json')==2
+                assert '随后只读双重核验' in result['message']
+            else:
+                assert '未完成最终核验' in result['message']
+                if outcome!='unstable':assert read(d/'simulated-final-read-count.json')==1
+            results.append(f'PASS {operation} final post-commit timeout: {outcome}, bounded read-only finish and no repeated writes')
     d,r=setup(base);(d/'simulation-fail-step-1').touch();p=start(d);wait(d,['restored']);done(p)
     assert read(d/'simulated-displays.json')==r['before']['displays'];results.append('PASS mid-apply failure rolls back completed steps')
     d,r=setup(base);(d/'simulation-fail-step-1').touch();(d/'simulation-fail-rollback').touch();p=start(d);wait(d,['failed']);done(p)

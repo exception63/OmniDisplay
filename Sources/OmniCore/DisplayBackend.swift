@@ -369,7 +369,8 @@ extension CoreGraphicsBackend {
         }
         func stable(matching:Bool) throws -> [Display] {
             try ModeStability.wait(expected: step.after, office: request.office.displays,
-                matching: matching, enabling: step.action == .enable, mayProceed: mayProceed, read: { try list() })
+                matching: matching, enabling: step.action == .enable, mayProceed: mayProceed, read: { try list() },
+                audit: { diagnostics?.record("modeStability", $0) })
         }
         var current=try stable(matching:false)
         for saved in step.after {
@@ -401,6 +402,7 @@ extension CoreGraphicsBackend {
                 try check(CGConfigureDisplayOrigin(config,live.displayID,saved.x,saved.y),"模式排列/主屏")
             }
         }
-        return try stable(matching:true)
+        do { return try stable(matching:true) }
+        catch is ModeSettleDeadline where step.action == .arrange { throw ModePostCommitDeadline() }
     }
 }

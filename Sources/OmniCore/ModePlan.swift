@@ -89,4 +89,10 @@ public struct ModePlan: Sendable {
         }
         return "部分状态 · \(current.count)/\(office.displays.count) 屏活动"
     }
+    public static func failureSummary(current: [Display], office: Snapshot?, boot: String, fresh: Bool) -> String {
+        if fresh, let office, office.boot == boot, boot != "unknown", TemporaryLayout.matches(office.displays, current) {
+            return "最近读取符合办公室完整排列；上次事务未完成核验，历史结果仍保留。"
+        }
+        return "上次事务未完成核验；请核对当前画面，历史结果不代表当前连接状态。"
+    }
 }

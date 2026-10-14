@@ -12,6 +12,8 @@ import OmniCore
     @Published var selectedID: String?
     @Published var status = "只读检测中…"
     @Published var error: String?
+    @Published var modeFailureHistory: String?
+    @Published private var latestReadSucceeded = false
     @Published var receipt: Receipt?
     @Published var confirmation: OmniCore.Operation?
     @Published var retained = ""
@@ -82,8 +84,8 @@ import OmniCore
                let request = try? Files.read(Request.self, from: candidate.appendingPathComponent("request.json")), request.simulation == simulation,
                let result = try? Files.read(Receipt.self, from: candidate.appendingPathComponent("receipt.json")) {
                 if !result.phase.terminal { journal = candidate; receipt = result; sentExecute = true; transactionRequest = request }
-                else if result.phase == .failed, ModePlan.isMode(request.operation), !TemporaryLayout.matches(request.office.displays,displays.filter(\.active)) {
-                    error="上次模式恢复未完成。请核对实体画面后选择办公室恢复；原基线与事务入口均已保留。"
+                else if result.phase == .failed, ModePlan.isMode(request.operation) {
+                    modeFailureHistory = result.message
                 }
             }
         }
@@ -100,6 +102,11 @@ import OmniCore
     private var modeOfficeURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-mode-office.json" : "mode-office.json") }
     var modeScreens: [Display] { (officeLayout?.displays ?? layoutSession?.original.displays ?? displays).sorted { $0.main && !$1.main } }
     var modeStatus: String { ModePlan.status(current:displays.filter(\.active),office:officeLayout ?? layoutSession?.original ?? layout) }
+    var modeFailureSummary: String {
+        ModePlan.failureSummary(current: displays.filter(\.active), office: officeLayout ?? layoutSession?.original ?? layout,
+            boot: currentBoot, fresh: simulation || (latestReadSucceeded && now.timeIntervalSince(lastRefresh) < 3))
+    }
+    var displayedStatus: String { modeFailureHistory != nil && receipt?.phase == .failed ? "上次事务：" + status : status }
     func prepareMode(_ action: OmniCore.Operation) {
         guard !busy, probingInput == nil, ModePlan.isMode(action) else { return }
         if let modeBaselineError { error=modeBaselineError;return }
@@ -157,8 +164,10 @@ import OmniCore
     func refresh() {
         defer { lastRefresh = Date() }
         guard !simulation else { return }
+        latestReadSucceeded = false
         do {
             let live = try backend.list()
+            latestReadSucceeded = true
             let ids = Set(live.map(\.id))
             let offline = (registry?.displays ?? []).filter { !ids.contains($0.id) }.map { d -> Display in var copy = d; copy.active = false; copy.main = false; return copy }
             let latest = (live + offline).sorted { $0.id < $1.id }
@@ -343,7 +352,7 @@ import OmniCore
         try Files.write(request, to: dir.appendingPathComponent("request.json"))
         let child = Process(); child.executableURL = executable; child.arguments = ["--transaction", dir.path]
         child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
-        try child.run(); error = nil; transactionRequest = request; decisionPending = false; journal = dir; process = child; sentExecute = false; receipt = nil
+        try child.run(); error = nil; modeFailureHistory = nil; transactionRequest = request; decisionPending = false; journal = dir; process = child; sentExecute = false; receipt = nil
         do { try Files.write(dir.path, to: activeURL) } catch { try? Files.marker("cancel", in: dir); throw error }
         status = "正在准备目标屏幕操作…"
     }
@@ -400,11 +409,15 @@ import OmniCore
             if simulation, let inputs = try? Files.read([String: UInt16].self, from: journal.appendingPathComponent("simulated-inputs.json")) {
                 for (target, value) in inputs { inputProbes[target] = InputProbe(target: target, state: .readable, current: value, detail: "模拟输入源；真实屏幕未改变。", simulation: true) }
             }
-            if next.phase == .failed { error = next.message }
+            if next.phase == .failed {
+                if ModePlan.isMode(transactionRequest?.operation ?? .connect) { modeFailureHistory = next.message }
+                else { error = next.message }
+            }
         }
         if !(receipt?.phase.terminal ?? false), (process.map { !$0.isRunning } ?? !RecoveryEngine.operationIsRunning(parent: journal.deletingLastPathComponent())) {
             receipt = Receipt(.failed, "上次操作进程已退出，恢复未确认。完整办公室基线和事务入口已保留；请检查实体屏幕后选择办公室恢复，勿重复断开。")
-            error = receipt?.message
+            if ModePlan.isMode(transactionRequest?.operation ?? .connect) { modeFailureHistory = receipt?.message }
+            else { error = receipt?.message }
         }
     }
 }

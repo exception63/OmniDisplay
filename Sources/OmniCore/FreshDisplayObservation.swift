@@ -156,7 +156,9 @@ public enum FreshDisplayObserver {
     }
 
     public static func read(executable: URL = URL(fileURLWithPath: CommandLine.arguments[0]),
-                            cancelled: () -> Bool = { false }, journal: TransactionAudit? = nil, audit: (DisplayObservation) -> Void = { _ in }) throws -> [Display] {
+                            cancelled: () -> Bool = { false }, journal: TransactionAudit? = nil,
+                            timeout: Double = 1.2, audit: (DisplayObservation) -> Void = { _ in }) throws -> [Display] {
+        guard timeout.isFinite, timeout > 0, timeout <= 1.2 else { throw OmniError.message("只读观察预算无效。") }
         let nonce = UUID().uuidString
         let readStarted = ProcessInfo.processInfo.systemUptime
         journal?.record("freshReadStarted", AuditDetail("", ["observerNonce": nonce, "startedUptime": String(readStarted)]))
@@ -176,9 +178,9 @@ public enum FreshDisplayObserver {
             let boot = CoreGraphicsBackend.bootID
             guard !cancelled() else { throw OmniError.message("只读观察已取消。") }
             try child.run()
-            journal?.record("observerLaunched", AuditDetail("", ["observerNonce": nonce, "childPID": String(child.processIdentifier), "launched": String(launched), "transportDeadline": String(launched+1.2)]))
+            journal?.record("observerLaunched", AuditDetail("", ["observerNonce": nonce, "childPID": String(child.processIdentifier), "launched": String(launched), "transportDeadline": String(launched+timeout)]))
             while child.isRunning {
-                if cancelled() || ProcessInfo.processInfo.systemUptime - launched >= 1.2 {
+                if cancelled() || ProcessInfo.processInfo.systemUptime - launched >= timeout {
                     journal?.record("observerTerminationRequested", AuditDetail("cancelledOrTransportDeadline", ["childPID": String(child.processIdentifier)]))
                     child.terminate()
                     if child.isRunning { kill(child.processIdentifier, SIGKILL) }
@@ -187,6 +189,7 @@ public enum FreshDisplayObserver {
                 HelperEventLoop.wait(0.01)
             }
             journal?.record("observerExited", AuditDetail("", ["childPID": String(child.processIdentifier), "terminationStatus": String(child.terminationStatus), "terminationReason": String(describing: child.terminationReason)]))
+            guard ProcessInfo.processInfo.systemUptime - launched < timeout else { throw OmniError.message("独立只读观察已超时，未采用迟到结果。") }
             let size = ((try FileManager.default.attributesOfItem(atPath: output.path)[.size]) as? NSNumber)?.intValue ?? Int.max
             if !cancelled(), child.terminationStatus == 75 { throw ObservationNotSettled() }
             guard !cancelled(), child.terminationStatus == 0, size <= 262144 else {

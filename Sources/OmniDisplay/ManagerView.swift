@@ -26,6 +26,12 @@ struct ManagerView: View {
                 }.padding(.top, 16)
                 if model.simulation { Label("模拟模式 · \(model.demoCount) 屏 · 所有操作不改变真实显示器", systemImage: "testtube.2").foregroundStyle(.orange).font(.callout) }
                 if let error = model.error { HStack(alignment: .top) { Image(systemName: "exclamationmark.triangle"); Text(error).textSelection(.enabled); Spacer(); Button { model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }.font(.callout).foregroundStyle(.red).padding(15).background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 14)) }
+                if let history = model.modeFailureHistory {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(model.modeFailureSummary, systemImage: "clock.arrow.circlepath").font(.callout)
+                        DisclosureGroup("上次事务原始结果") { Text(history).font(.caption).textSelection(.enabled) }
+                    }.padding(15).frame(maxWidth: .infinity, alignment: .leading).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                }
                 ModeControls(model:model).padding(20).modifier(GlassCard())
                 VStack(alignment: .leading, spacing: 18) {
                     HStack { Label("屏幕排列", systemImage: "rectangle.3.group").font(.headline); Spacer(); Text("\(model.activeCount) 活动 · \(model.displays.count) 已知").font(.caption).foregroundStyle(.secondary) }
@@ -48,7 +54,7 @@ struct ManagerView: View {
                         Text("部分屏幕可能仍需物理拔插；独立恢复进程不能保证硬件或 WindowServer 故障时恢复。").font(.caption).foregroundStyle(.secondary)
                     }
                 }.padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
-                HStack { Text(model.status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled); Spacer(); Text("OmniDisplay 0.5 · 屏幕与工作模式").font(.caption2).foregroundStyle(.tertiary) }
+                HStack { Text(model.displayedStatus).font(.caption).foregroundStyle(.secondary).textSelection(.enabled); Spacer(); Text("OmniDisplay 0.5 · 屏幕与工作模式").font(.caption2).foregroundStyle(.tertiary) }
             }.padding(30)
         }.background { ZStack { Color(nsColor: .windowBackgroundColor); LinearGradient(colors: [accent.opacity(0.12), .clear, Color.cyan.opacity(0.06)], startPoint: .topTrailing, endPoint: .bottomLeading) }.ignoresSafeArea() }.tint(accent)
         .safeAreaInset(edge: .top, spacing: 0) {

@@ -9,16 +9,25 @@ public struct ModeWork: Codable {
     public var rollbackFrom: [Display]?
     public var index: Int
 }
-public struct ModeStepFailure: Codable { public var nonce: String; public var message: String }
+public struct ModeStepFailure: Codable {
+    public enum Kind: String, Codable { case postCommitSettleDeadline }
+    public var nonce: String
+    public var message: String
+    public var kind: Kind?
+    public var stepIndex: Int?
+}
 public enum ModeEngine {
     public static func run(request:Request,directory:URL,status:(Receipt)throws->Void) throws {
         let plan=try ModePlan.make(request)
         // The independent owner receives sleep/wake even if the UI was killed.
-        let center=NSWorkspace.shared.notificationCenter
-        let observers=[NSWorkspace.willSleepNotification,NSWorkspace.didWakeNotification].map { name in
-            center.addObserver(forName:name,object:nil,queue:nil) { _ in try? Files.marker("cancel",in:directory) }
-        }
-        defer { observers.forEach(center.removeObserver) }
+        // Simulation does not attach to the user's desktop or power session.
+        let center = request.simulation ? nil : NSWorkspace.shared.notificationCenter
+        let observers = center.map { center in
+            [NSWorkspace.willSleepNotification,NSWorkspace.didWakeNotification].map { name in
+                center.addObserver(forName:name,object:nil,queue:nil) { _ in try? Files.marker("cancel",in:directory) }
+            }
+        } ?? []
+        defer { if let center { observers.forEach(center.removeObserver) } }
         let simulated=directory.appendingPathComponent("simulated-displays.json")
         if request.simulation { try Files.write(request.before.displays,to:simulated) }
         func exists(_ key:String)->Bool { FileManager.default.fileExists(atPath:directory.appendingPathComponent(key).path) }
@@ -34,6 +43,9 @@ public enum ModeEngine {
                     guard TemporaryLayout.matches(step.before,live) else { throw OmniError.message("模拟模式并发变化。") }
                     if exists(work.restoring ? "simulation-fail-rollback" : "simulation-fail-step-\(work.index)") { throw OmniError.message("模拟注入步骤失败。") }
                     try Files.write(step.after,to:simulated)
+                    if step.action == .arrange, exists(work.restoring ? "simulation-postcommit-rollback" : "simulation-postcommit-apply") {
+                        throw ModePostCommitDeadline()
+                    }
                 } else if let target=work.rescue {
                     if exists("simulation-fail-rollback") { throw OmniError.message("模拟回滚失败。") }
                     if !live.contains(where:{$0.id==target}), var saved=(request.operation == .officeMode ? request.office : request.before).displays.first(where:{$0.id==target}) { saved.main=false;try Files.write(live+[saved],to:simulated) }
@@ -46,9 +58,40 @@ public enum ModeEngine {
                 try BoundedChild.run(executable:URL(fileURLWithPath:CommandLine.arguments[0]),arguments:["--mode-step",directory.path,file],timeout:10,cancelled:{ !work.restoring && exists("cancel") })
             } catch {
                 if let failure = try? Files.read(ModeStepFailure.self, from: directory.appendingPathComponent(file + ".result.json")), failure.nonce == request.nonce {
+                    if failure.kind == .postCommitSettleDeadline, failure.stepIndex == work.index, work.step?.action == .arrange {
+                        throw ModePostCommitDeadline()
+                    }
                     throw OmniError.message(failure.message)
                 }
                 throw error
+            }
+        }
+        func finishAfterDeadline(expected: [Display], reason: String) {
+            let audit = try? TransactionAudit(directory: directory, nonce: request.nonce, phase: "restore", role: "owner")
+            audit?.record("finalVerificationStarted", AuditDetail("已提交排列的原步骤核验超时；仅重新读取，不再写入。"))
+            try? status(Receipt(.restoring, reason + " 原步骤核验超时；正在只读核对最终排列，不再调整屏幕。"))
+            do {
+                var samples = 0
+                _ = try ModeFinalVerification.wait(expected: expected, office: request.office.displays, boot: request.before.boot,
+                    mayProceed: { request.simulation || (CoreGraphicsBackend.bootID == request.before.boot && RecoveryEngine.operationIsRunning(parent: directory.deletingLastPathComponent())) },
+                    read: { remaining in
+                        samples += 1
+                        if request.simulation {
+                            try Files.write(samples, to: directory.appendingPathComponent("simulated-final-read-count.json"))
+                            if exists("simulation-final-unstable") { HelperEventLoop.wait(min(0.1, remaining)); throw ObservationNotSettled() }
+                            var live = try read()
+                            if exists("simulation-final-layout") { live[0].y += 17 }
+                            if exists("simulation-final-identity") { live[0].serial += 1 }
+                            return Snapshot(boot: exists("simulation-final-boot") ? "other-boot" : request.before.boot, displays: live)
+                        }
+                        let live = try FreshDisplayObserver.read(cancelled: { CoreGraphicsBackend.bootID != request.before.boot }, journal: audit, timeout: remaining)
+                        return Snapshot(boot: CoreGraphicsBackend.bootID, displays: live)
+                    }, audit: { audit?.record("finalVerificationSample", $0) })
+                audit?.record("finalVerificationSucceeded", AuditDetail("两次新的独立读数核对完成。"))
+                try status(Receipt(.restored, reason + " 原步骤核验超时；随后只读双重核验确认完整目标排列已恢复。未追加显示写入。"))
+            } catch {
+                audit?.record("finalVerificationFailed", AuditDetail(error.localizedDescription))
+                try? status(Receipt(.failed, reason + " 排列已提交，但未完成最终核验：" + error.localizedDescription + " 已停止调整；请先核对当前画面，有异常再用实体OSD/单独视频线恢复。"))
             }
         }
         func preserveOffice(_ reason: String, completeMissing: Bool) {
@@ -79,7 +122,12 @@ public enum ModeEngine {
                 let current=try read()
                 if plan.recognizes(current,entry:request.before.displays) {
                     let rollback=try ModePlan.transition(from:current,to:request.before.displays,office:request.office.displays)
-                    for (i,step) in rollback.steps.enumerated() { try execute(ModeWork(step:step,rescue:nil,restoring:true,rollbackFrom:current,index:i)) }
+                    for (i,step) in rollback.steps.enumerated() {
+                        do { try execute(ModeWork(step:step,rescue:nil,restoring:true,rollbackFrom:current,index:i)) }
+                        catch is ModePostCommitDeadline where i == rollback.steps.count-1 && step.action == .arrange && TemporaryLayout.matches(request.before.displays, step.after) {
+                            finishAfterDeadline(expected: request.before.displays, reason: reason); return
+                        }
+                    }
                 } else {
                     // Unknown manual/hotplug geometry: never replay or disable it.
                     // Enable missing entry screens only, then report partial recovery.
@@ -89,7 +137,7 @@ public enum ModeEngine {
                 }
                 let complete=TemporaryLayout.matches(request.before.displays,try read())
                 try status(Receipt(complete ? .restored : .failed, complete ? reason+" 已核对恢复本次入口状态。" : reason+" 部分恢复：已尝试启用入口屏幕；现场变化未覆盖，请检查实体屏。"))
-            } catch { try? status(Receipt(.failed,reason+" 恢复未完成："+error.localizedDescription+" 请用实体OSD/单独视频线恢复。")) }
+            } catch { try? status(Receipt(.failed,reason+" 恢复尚未核验："+error.localizedDescription+" 请先核对当前画面，有异常再用实体OSD/单独视频线恢复。")) }
         }
         do {
             guard TemporaryLayout.matches(request.before.displays,try read()) else { throw OmniError.message("模式入口已变化，未执行计划。") }
@@ -100,7 +148,10 @@ public enum ModeEngine {
                 guard !exists("cancel"), ProcessInfo.processInfo.systemUptime < applyEnd, Date() < applyDate else { throw OmniError.message("模式切换取消或过期。") }
                 let targetName = request.office.displays.first { $0.id == step.target }?.name ?? "完整办公室排列"
                 try status(Receipt(.applying,"模式步骤 \(i+1)/\(plan.steps.count)：\(step.action == .enable ? "连接" : step.action == .disable ? "断开" : "恢复排列") · \(targetName)；目标 \(step.after.count)/\(request.office.displays.count) 屏活动"))
-                try execute(ModeWork(step:step,rescue:nil,restoring:false,rollbackFrom:nil,index:i))
+                do { try execute(ModeWork(step:step,rescue:nil,restoring:false,rollbackFrom:nil,index:i)) }
+                catch is ModePostCommitDeadline where request.operation == .officeMode && i == plan.steps.count-1 && step.action == .arrange && TemporaryLayout.matches(request.office.displays, step.after) {
+                    finishAfterDeadline(expected: request.office.displays, reason: "办公室恢复。"); return
+                }
                 guard TemporaryLayout.matches(step.after,try read()) else { throw OmniError.message("模式步骤核验失败。") }
                 try Files.write(Snapshot(boot:request.before.boot,displays:try read()),to:directory.appendingPathComponent("mode-checkpoint.json"))
             }
@@ -118,8 +169,10 @@ public enum ModeEngine {
         guard file.hasPrefix("mode-work-"), file.hasSuffix(".json"), !file.contains("/"), !file.contains("..") else { throw OmniError.message("模式步骤路径无效。") }
         do { try performWorker(directory: directory, file: file) }
         catch {
-            try? Files.write(ModeStepFailure(nonce: directory.lastPathComponent, message: error.localizedDescription), to: directory.appendingPathComponent(file + ".result.json"))
-            let restoring = (try? Files.read(ModeWork.self, from: directory.appendingPathComponent(file)))?.restoring == true
+            let work = try? Files.read(ModeWork.self, from: directory.appendingPathComponent(file))
+            try? Files.write(ModeStepFailure(nonce: directory.lastPathComponent, message: error.localizedDescription,
+                kind: error is ModePostCommitDeadline ? .postCommitSettleDeadline : nil, stepIndex: work?.index), to: directory.appendingPathComponent(file + ".result.json"))
+            let restoring = work?.restoring == true
             if let audit = try? TransactionAudit(directory: directory, nonce: directory.lastPathComponent, phase: restoring ? "restore" : "apply", role: "worker") {
                 audit.record("modeStepFailed", AuditDetail(error.localizedDescription, ["file": file]))
             }
