@@ -2,7 +2,7 @@
 """Subprocess contract tests. Every request has simulation=true; never calls CG mutation APIs."""
 import json, os, pathlib, subprocess, tempfile, time, uuid
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-HELPER = ROOT / 'dist/OmniDisplay.app/Contents/Helpers/OmniRecovery'
+HELPER = ROOT / 'dist.noindex/OmniDisplay.app/Contents/Helpers/OmniRecovery'
 
 def read(path):
     try: return json.loads(path.read_text())
@@ -20,7 +20,7 @@ def setup(parent, timeout=1):
     d = parent/str(uuid.uuid4()); d.mkdir()
     displays = [dict(id=f'00000000-0000-0000-0000-{i+1:012d}', displayID=i+1, name='同型号屏幕', active=True, main=i==0, builtin=False, mirrored=False, vendor=610, model=1, serial=i, x=i*1920, y=0, width=1920, height=1080, pixelWidth=3840, pixelHeight=2160, refresh=60, rotation=0) for i in range(4)]
     snap = dict(version=1, date=time.time()-978307200, boot='simulation', displays=displays)
-    req = dict(version=1, nonce=d.name, operation='remote', before=snap, office=snap, keep=displays[0]['id'], confirmedPhysical=True, simulation=True, timeout=timeout)
+    req = dict(version=1, nonce=str(uuid.uuid4()), operation='remote', before=snap, office=snap, keep=displays[0]['id'], confirmedPhysical=True, simulation=True, timeout=timeout)
     (d/'request.json').write_text(json.dumps(req)); return d
 
 def launch(d): return subprocess.Popen([str(HELPER), '--transaction', str(d)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

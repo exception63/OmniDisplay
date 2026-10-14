@@ -50,11 +50,9 @@ import OmniCore
     var selected: Display? { displays.first { $0.id == selectedID } }
     var sortedDisplays: [Display] { displays.sorted { if $0.main != $1.main { return $0.main }; return $0.id < $1.id } }
     var currentBoot: String { simulation ? "simulation" : CoreGraphicsBackend.bootID }
-    init() {
-        let args = CommandLine.arguments
-        if let i = args.firstIndex(of: "--data-dir"), args.count > i+1 { dataDirectory = URL(fileURLWithPath: args[i+1], isDirectory: true) }
-        else { dataDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OmniDisplay") }
-        if let i = args.firstIndex(of: "--demo"), args.count > i+1 { demoCount = max(1,min(24,Int(args[i+1]) ?? 4)) } else { demoCount = 0 }
+    init(configuration: AppLaunch) {
+        dataDirectory = configuration.dataDirectory
+        demoCount = configuration.demoCount
         do {
             try FileManager.default.createDirectory(at: dataDirectory.appendingPathComponent("Transactions"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let file = dataDirectory.appendingPathComponent(simulation ? "demo-identities.json" : "identities.json")

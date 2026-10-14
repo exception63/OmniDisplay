@@ -2,7 +2,7 @@
 """Mode owner lifecycle tests. All requests are explicitly simulation=true."""
 import copy,json,pathlib,subprocess,tempfile,time,uuid,fcntl
 ROOT=pathlib.Path(__file__).resolve().parent.parent
-HELPER=ROOT/'dist/OmniDisplay.app/Contents/Helpers/OmniRecovery'
+HELPER=ROOT/'dist.noindex/OmniDisplay.app/Contents/Helpers/OmniRecovery'
 def read(p):
     try:return json.loads(p.read_text())
     except (FileNotFoundError,json.JSONDecodeError):return {}

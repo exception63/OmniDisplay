@@ -3,7 +3,13 @@ import AppKit
 import OmniCore
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    let model = AppModel()
+    let model: AppModel
+    let configuration: AppLaunch
+    init(configuration: AppLaunch) {
+        self.configuration = configuration
+        self.model = AppModel(configuration: configuration)
+        super.init()
+    }
     private var statusConfirmationNonce: String?
     private var confirmationPanel: ConfirmationPanelController?
     private var observer: NSObjectProtocol?
@@ -13,18 +19,14 @@ import OmniCore
     private var presentationGeneration = 0
     private var menuHost: NSHostingController<MenuPanel>?
     private func recordUI(_ event: String) {
-        let record: [String: Any] = ["statusTitle": statusItem?.button?.title ?? "", "remaining": model.countdown, "awaitingConfirmation": model.awaitingDecision, "buttonBounds": statusItem?.button.map { NSStringFromRect($0.bounds) } ?? "none", "popoverFrame": panel?.contentViewController?.view.window.map { NSStringFromRect($0.frame) } ?? "none", "popoverContentSize": panel.map { NSStringFromSize($0.contentSize) } ?? "none", "event": event, "pid": ProcessInfo.processInfo.processIdentifier, "managerVisible": manager?.isVisible ?? false, "appActive": NSApp.isActive, "managerKey": manager?.isKeyWindow ?? false, "keyWindowClass": NSApp.keyWindow.map { String(describing: type(of: $0)) } ?? "none", "firstResponderClass": NSApp.keyWindow?.firstResponder.map { String(describing: type(of: $0)) } ?? "none", "panelShown": panel?.isShown ?? false, "statusVisible": statusItem?.isVisible ?? false, "statusFrame": statusItem?.button?.window.map { NSStringFromRect($0.frame) } ?? "none"]
+        let record: [String: Any] = ["simulation": model.simulation, "bundlePath": Bundle.main.bundleURL.path, "bundleID": Bundle.main.bundleIdentifier ?? "", "dataDirectory": model.dataDirectory.path, "statusTitle": statusItem?.button?.title ?? "", "remaining": model.countdown, "awaitingConfirmation": model.awaitingDecision, "buttonBounds": statusItem?.button.map { NSStringFromRect($0.bounds) } ?? "none", "popoverFrame": panel?.contentViewController?.view.window.map { NSStringFromRect($0.frame) } ?? "none", "popoverContentSize": panel.map { NSStringFromSize($0.contentSize) } ?? "none", "event": event, "pid": ProcessInfo.processInfo.processIdentifier, "managerVisible": manager?.isVisible ?? false, "appActive": NSApp.isActive, "managerKey": manager?.isKeyWindow ?? false, "keyWindowClass": NSApp.keyWindow.map { String(describing: type(of: $0)) } ?? "none", "firstResponderClass": NSApp.keyWindow?.firstResponder.map { String(describing: type(of: $0)) } ?? "none", "panelShown": panel?.isShown ?? false, "statusVisible": statusItem?.isVisible ?? false, "statusFrame": statusItem?.button?.window.map { NSStringFromRect($0.frame) } ?? "none"]
         if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) { try? data.write(to: model.dataDirectory.appendingPathComponent("ui-state.json"), options: .atomic) }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if !CommandLine.arguments.contains("--demo"), let primary = NSRunningApplication.runningApplications(withBundleIdentifier:"io.github.exception63.OmniDisplay").first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
-            DistributedNotificationCenter.default().postNotificationName(NSNotification.Name("OmniDisplay.ShowManager"),object:nil)
-            primary.activate(options:[.activateAllWindows]); NSApp.terminate(nil); return
-        }
         NSApp.setActivationPolicy(.accessory)
         // Let AppKit choose the status item's position.
         let item = NSStatusBar.system.statusItem(withLength:30)
-        item.autosaveName = "OmniDisplay.MenuBar"
+        item.autosaveName = configuration.instanceKey + ".MenuBar"
         item.isVisible = true
         if let button = item.button {
             button.image = NSImage(systemSymbolName:"display.2",accessibilityDescription:"OmniDisplay 屏幕菜单")
@@ -47,7 +49,7 @@ import OmniCore
         popover.contentViewController = host
         popover.delegate = self
         panel = popover
-        observer = DistributedNotificationCenter.default().addObserver(forName:NSNotification.Name("OmniDisplay.ShowManager"),object:nil,queue:.main) { [weak self] _ in Task { @MainActor in self?.showManager() } }
+        observer = DistributedNotificationCenter.default().addObserver(forName:NSNotification.Name(configuration.notificationName),object:nil,queue:.main) { [weak self] _ in Task { @MainActor in self?.showManager() } }
         model.onShowManager = { [weak self] in self?.showManager() }
         confirmationPanel = ConfirmationPanelController(model: model)
         model.onTransactionUIChange = { [weak self] in
@@ -125,7 +127,7 @@ import OmniCore
         panel?.performClose(nil)
         if manager == nil {
             let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1000,height:760),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
-            window.title = "OmniDisplay · 屏幕"; window.titlebarAppearsTransparent = true
+            window.title = model.simulation ? "OmniDisplay Simulation · 仅模拟" : "OmniDisplay · 屏幕"; window.titlebarAppearsTransparent = true
             window.delegate = self; window.isReleasedWhenClosed = false; window.minSize = NSSize(width:800,height:590)
             window.contentView = NSHostingView(rootView:ManagerView(model:model))
             window.center(); manager = window
@@ -174,7 +176,27 @@ extension AppDelegate: NSPopoverDelegate {
 @main struct OmniDisplayApp {
     @MainActor static func main() {
         let app = NSApplication.shared
-        let delegate = AppDelegate()
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let configuration: AppLaunch
+        let instance: AppInstanceLock
+        do {
+            configuration = try AppLaunch.resolve(arguments: CommandLine.arguments,
+                bundleID: Bundle.main.bundleIdentifier ?? "OmniDisplay.Development",
+                simulationBundle: Bundle.main.object(forInfoDictionaryKey: "OmniDisplaySimulation") as? Bool == true,
+                support: support, savedProductionDirectory: UserDefaults.standard.string(forKey: "ProductionDataDirectory"))
+            guard let acquired = try AppInstanceLock(directory: support.appendingPathComponent("OmniDisplay/Instances"), key: configuration.instanceKey) else {
+                DistributedNotificationCenter.default().postNotificationName(NSNotification.Name(configuration.notificationName), object: nil)
+                return
+            }
+            instance = acquired
+            if !configuration.simulation {
+                UserDefaults.standard.set(configuration.dataDirectory.path, forKey: "ProductionDataDirectory")
+            }
+        } catch {
+            let alert = NSAlert(); alert.messageText = "OmniDisplay 未启动"; alert.informativeText = error.localizedDescription
+            app.setActivationPolicy(.accessory); app.activate(ignoringOtherApps: true); alert.runModal(); return
+        }
+        let delegate = AppDelegate(configuration: configuration)
         app.delegate = delegate
         let menu = NSMenu()
         let appItem = NSMenuItem()
@@ -190,7 +212,7 @@ extension AppDelegate: NSPopoverDelegate {
             editMenu.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
         }
         editItem.submenu = editMenu; menu.addItem(editItem); app.mainMenu = menu
-        withExtendedLifetime(delegate) { app.run() }
+        withExtendedLifetime((delegate, instance)) { app.run() }
     }
 }
 struct MenuPanel: View {

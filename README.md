@@ -23,10 +23,10 @@
 
 ```sh
 ./scripts/build.sh
-open dist/OmniDisplay.app
+open dist.noindex/OmniDisplay.app
 ```
 
-产物为 `dist/OmniDisplay.app`，内含 `OmniRecovery` helper。仅启动或打开管理窗口不会更改显示设置。关闭窗口后菜单栏应用继续运行，可用 ⌘0 打开管理窗口。可在无待处理事务时退出应用，将整个 `.app` 拷贝至 `/Applications` 后再启动；不要同时运行两份。
+产物为 `dist.noindex/OmniDisplay.app`，内含 `OmniRecovery` helper。仅启动或打开管理窗口不会更改显示设置。关闭窗口后菜单栏应用继续运行，可用 ⌘0 打开管理窗口。可在无待处理事务时退出应用，将整个 `.app` 拷贝至 `/Applications` 后再启动；不要同时运行两份。
 
 构建脚本进行本地 ad-hoc 签名；项目未提供开发者签名、公证或安装包，不应通过关闭系统安全保护来安装。应用不要求辅助功能或屏幕录制权限。底层显示启停、旋转和 DDC 含私有接口，API 存在只说明符号可加载，不保证某台机器可安全恢复；不保证未来 macOS 兼容。
 
@@ -58,10 +58,11 @@ python3 scripts/test-modes.py
 退出其他 OmniDisplay 实例后，可查看模拟界面：
 
 ```sh
-open dist/OmniDisplay.app --args --demo 4 --data-dir "$PWD/artifacts/demo"
+./scripts/build.sh --simulation
+open "dist.noindex/OmniDisplay Simulation.app" --args --demo 4 --data-dir "$PWD/artifacts/demo"
 ```
 
-`--demo` 可选择不同屏幕数量。测试夹具使用合成身份，保留多屏几何关系用于回归；模拟通过不是硬件兼容性证明。验证结果和已知限制见 [验收记录](docs/VALIDATION.md)。
+模拟版使用独立名称、bundle ID、偏好、进程锁和 `Simulation` 数据子目录；即使不带参数打开也只会模拟。正式版拒绝 `--demo`，从搜索启动会沿用上次正式数据目录。`--demo` 可选择不同屏幕数量。测试夹具使用合成身份，保留多屏几何关系用于回归；模拟通过不是硬件兼容性证明。验证结果和已知限制见 [验收记录](docs/VALIDATION.md)。
 
 本次连接从开始执行到 macOS 状态核验完成约 **0.55 秒**，但用户感知实际亮屏约 10 秒。日志没有实体画面出现的时间戳，尚不能定位这段差异；没有据此缩短恢复保护或宣称延迟已修复。
 
@@ -74,3 +75,5 @@ open dist/OmniDisplay.app --args --demo 4 --data-dir "$PWD/artifacts/demo"
 ## 许可证与来源
 
 沿用项目现有 MIT 许可证，公开署名为 GitHub 账号 `exception63`。aspace、displayplacer、m1ddc 的静态参考及原始许可证列于 [第三方说明](THIRD_PARTY_NOTICES.md)，构建时随 App 打包。未运行下载的上游程序，未复制 GPL 源码。
+
+0.5.1修复正式版误把同身份模拟进程当成已有实例而退出的问题。构建产物放入`dist.noindex/`，避免被Spotlight作为日常入口收录；日常使用`/Applications/OmniDisplay.app`。历史备份应保存在不索引目录，不能用模拟窗口作为正式启动验收。
