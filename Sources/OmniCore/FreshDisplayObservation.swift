@@ -49,6 +49,30 @@ public final class DisplayObservationEpoch {
     }
 }
 
+/// Scoped read-only invalidation monitor. Its generation is local to this
+/// process and must never be compared with a different observer's generation.
+final class DisplayObservationMonitor {
+    let epoch = DisplayObservationEpoch()
+    private let callback: CGDisplayReconfigurationCallBack = { display, flags, context in
+        guard let context else { return }
+        Unmanaged<DisplayObservationEpoch>.fromOpaque(context).takeUnretainedValue()
+            .changed(display: display, beginning: flags.contains(.beginConfigurationFlag))
+    }
+    private var appNotice: NSObjectProtocol?
+    init() throws {
+        let pointer = Unmanaged.passUnretained(epoch).toOpaque()
+        guard CGDisplayRegisterReconfigurationCallback(callback, pointer) == .success else {
+            throw OmniError.message("无法注册只读重配观察。")
+        }
+        appNotice = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: nil) { [epoch] _ in epoch.invalidate() }
+    }
+    deinit {
+        CGDisplayRemoveReconfigurationCallback(callback, Unmanaged.passUnretained(epoch).toOpaque())
+        if let appNotice { NotificationCenter.default.removeObserver(appNotice) }
+    }
+}
+
 public struct DisplayObservationStability {
     private var previous: [Display]?
     private var priorGeneration: UInt64?
@@ -116,21 +140,11 @@ public enum FreshDisplayObserver {
     public static func collect(nonce: String, journal: TransactionAudit? = nil) throws -> DisplayObservation {
         guard Thread.isMainThread, UUID(uuidString: nonce) != nil else { throw OmniError.message("只读观察参数无效。") }
         let started = ProcessInfo.processInfo.systemUptime
-        let epoch = DisplayObservationEpoch()
-        let pointer = Unmanaged.passUnretained(epoch).toOpaque()
-        let callback: CGDisplayReconfigurationCallBack = { display, flags, context in
-            guard let context else { return }
-            Unmanaged<DisplayObservationEpoch>.fromOpaque(context).takeUnretainedValue()
-                .changed(display: display, beginning: flags.contains(.beginConfigurationFlag))
-        }
-        guard CGDisplayRegisterReconfigurationCallback(callback, pointer) == .success else { throw OmniError.message("无法注册只读重配观察。") }
-        defer { CGDisplayRemoveReconfigurationCallback(callback, pointer) }
-        let appNotice = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                                               object: nil, queue: nil) { _ in epoch.invalidate() }
-        defer { NotificationCenter.default.removeObserver(appNotice) }
+        let monitor = try DisplayObservationMonitor()
+        defer { withExtendedLifetime(monitor) {} }
         let backend = CoreGraphicsBackend(diagnostics: journal)
         return try DisplayObservationCollector.collect(nonce: nonce, pid: getpid(), boot: CoreGraphicsBackend.bootID, started: started,
-            read: { try backend.list() }, state: { epoch.state() }, now: { ProcessInfo.processInfo.systemUptime },
+            read: { try backend.list() }, state: { monitor.epoch.state() }, now: { ProcessInfo.processInfo.systemUptime },
             pause: { pumpEvents(for: $0) }, audit: { journal?.record("observerSample", $0) })
     }
 

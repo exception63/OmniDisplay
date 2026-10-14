@@ -69,9 +69,12 @@ public enum InputAttempt {
             let mayProceed = { Date() < deadline && (restoring || !FileManager.default.fileExists(atPath: directory.appendingPathComponent("cancel").path)) && RecoveryEngine.operationIsRunning(parent: directory.deletingLastPathComponent()) }
             let willMutate = { if !restoring { try Files.marker("input-mutation.intent", in: directory) } }
             let audit: (String) -> Void = { message in diagnostics?.record("writeDetail", AuditDetail(message)) }
+            var sampleCompleted: Double?
             let backend = CoreGraphicsBackend(freshRead: request.operation == .disconnect ? {
-                try FreshDisplayObserver.read(cancelled: { !mayProceed() }, journal: diagnostics)
-            } : nil, diagnostics: diagnostics)
+                sampleCompleted = nil
+                return try FreshDisplayObserver.read(cancelled: { !mayProceed() }, journal: diagnostics,
+                                                     audit: { sampleCompleted = $0.completed })
+            } : nil, freshObservationTime: { sampleCompleted }, diagnostics: diagnostics)
             let result: InputWriteResult
             if request.operation == .disconnect {
                 result = restoring ? try backend.recoverDisconnected(request) : try backend.disconnect(request, mayProceed: mayProceed, willMutate: willMutate, audit:audit)

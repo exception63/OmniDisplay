@@ -20,11 +20,13 @@ public final class CoreGraphicsBackend: DisplayBackend {
     private let enable: EnableFunction?
     private let diagnostics: TransactionAudit?
     private let freshRead: (() throws -> [Display])?
+    private let freshObservationTime: (() -> Double?)?
     public var canDisconnect: Bool { enable != nil }
     public var canRestoreRotation: Bool { ODRotationAvailable() }
-    public init(freshRead: (() throws -> [Display])? = nil, diagnostics: TransactionAudit? = nil) {
+    public init(freshRead: (() throws -> [Display])? = nil, freshObservationTime: (() -> Double?)? = nil, diagnostics: TransactionAudit? = nil) {
         self.diagnostics = diagnostics
         self.freshRead = freshRead
+        self.freshObservationTime = freshObservationTime
         library = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
         if let library, let symbol = dlsym(library, "CGSConfigureDisplayEnabled") { enable = unsafeBitCast(symbol, to: EnableFunction.self) } else { enable = nil }
     }
@@ -180,8 +182,11 @@ public final class CoreGraphicsBackend: DisplayBackend {
                   CGDisplayIsActive(target.displayID) == 0 else { throw OmniError.message("协调已取消、超时，或目标/保留实体屏状态变化。") }
         }
         func stable(for duration: Double, matching: Bool) throws -> [Display] {
-            try DisconnectStabilizer.wait(request: request, matching: matching, duration: duration,
-                                          read: { try self.list() }, safe: safe,
+            let monitor = try DisplayObservationMonitor()
+            defer { withExtendedLifetime(monitor) {} }
+            return try DisconnectStabilizer.wait(request: request, matching: matching, duration: duration,
+                                          read: { try self.list() }, safe: safe, state: { monitor.epoch.state() },
+                                          observationTime: { self.freshObservationTime?() },
                                           audit: { self.diagnostics?.record("stabilitySample", $0) })
         }
         var observed = try stable(for:1.2, matching:false)
