@@ -4,6 +4,12 @@ import AppKit
 import OmniCore
 
 @MainActor final class AppModel: ObservableObject {
+    @Published var rotationPreview: ModePreview?
+    @Published private(set) var rotationReading = false
+    @Published private(set) var rotationAction: RelativeRotation?
+    private var rotationReadGeneration = 0
+    var rotationSnapshotReader: (() async throws -> Snapshot)?
+    var interactionBlocked: Bool { busy || rotationReading || rotationPreview != nil }
     @Published var rotationUnavailable: [String:String] = [:]
     private var committedRotation: String?
     @Published var modePreview: ModePreview?
@@ -98,7 +104,7 @@ import OmniCore
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.refresh() } })
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in
-                guard let self else { return }; if self.busy { self.cancel() }; self.confirmation = nil; self.modePreview = nil; self.physicalConfirmed = false; self.refresh()
+                guard let self else { return }; if self.busy { self.cancel() }; self.cancelRotationPreview(); self.confirmation = nil; self.modePreview = nil; self.physicalConfirmed = false; self.refresh()
             } })
         }
     }
@@ -111,7 +117,7 @@ import OmniCore
     }
     var displayedStatus: String { modeFailureHistory != nil && receipt?.phase == .failed ? "上次事务：" + status : status }
     func prepareMode(_ action: OmniCore.Operation) {
-        guard !busy, probingInput == nil, [.remoteMode,.officeMode].contains(action) else { return }
+        guard !interactionBlocked, probingInput == nil, [.remoteMode,.officeMode].contains(action) else { return }
         if let modeBaselineError { error=modeBaselineError;return }
         do {
             refresh()
@@ -126,24 +132,21 @@ import OmniCore
         } catch { self.error=error.localizedDescription }
     }
     func executeMode(_ preview: ModePreview, confirmed: Bool) {
-        guard confirmed, !busy, modePreview?.id == preview.id else { return }
+        guard confirmed, !interactionBlocked, [.remoteMode,.officeMode].contains(preview.request.operation), modePreview?.id == preview.id else { return }
         do {
             refresh()
             var request=preview.request
             guard TemporaryLayout.matches(request.before.displays,displays.filter(\.active)) else { throw OmniError.message("预览后屏幕状态变化，请重新选择模式。") }
             _ = try ModePlan.make(request)
             if !simulation { request.liveConsent = try LiveTestConsent.grant(request:request,confirmedTarget:request.target ?? request.keep,riskAcknowledged:confirmed) }
-            if request.operation == .rotate {
-                guard request.rotationBaseline == officeLayout else { throw OmniError.message("办公室基线已变化，请重新预览。") }
-                try launch(request);modePreview=nil;return
-            }
             // Persist once before any worker; no intermediate checkpoint becomes the office baseline.
             try Files.write(request.office,to:modeOfficeURL);officeLayout=request.office
             try launch(request);modePreview=nil
         } catch { self.error=error.localizedDescription }
     }
     func rotationReason(_ display: Display) -> String? {
-        if busy { return "请等待当前操作结束" }
+        if interactionBlocked { return rotationReading ? "正在核对当前方向…" : "请先完成当前操作" }
+        if !simulation && !latestReadSucceeded { return "屏幕状态尚未核验，请刷新后重试" }
         if !display.active { return "连接后可调整方向" }
         if displays.contains(where: { $0.active && $0.mirrored }) { return "镜像模式不支持旋转" }
         if let sessionLoadError { return sessionLoadError }
@@ -153,20 +156,57 @@ import OmniCore
         if !simulation, let reason=rotationUnavailable[display.id] { return reason }
         return nil
     }
-    func prepareRotation(_ target: String, degrees: Int) {
-        guard !busy else { return }
-        refresh()
-        guard let display=displays.first(where:{$0.id==target}) else { return }
-        if let reason=rotationReason(display) { error=reason;return }
-        do {
-            let entry=Snapshot(boot:currentBoot,displays:displays.filter(\.active))
-            let keep=entry.displays.first(where:{$0.id != target && $0.main})?.id ?? entry.displays.first(where:{$0.id != target})?.id ?? target
-            var request=Request(operation:.rotate,before:entry,office:entry,keep:keep,confirmedPhysical:true,simulation:simulation,target:target)
-            request.rotationDegrees=degrees;request.rotationBaseline=officeLayout
-            let plan=try RotationPlan.make(request)
-            guard !plan.steps.isEmpty else { return }
-            actionDisplay=nil;onShowManager?();modePreview=ModePreview(request:request)
-        } catch { self.error=error.localizedDescription }
+    func cancelRotationPreview() {
+        rotationReadGeneration += 1; rotationPreview=nil; rotationReading=false; rotationAction=nil
+    }
+    private func freshRotationSnapshot() async throws -> Snapshot {
+        if let rotationSnapshotReader { return try await rotationSnapshotReader() }
+        if simulation { return Snapshot(boot:currentBoot,displays:displays.filter(\.active)) }
+        let helper=Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/OmniRecovery")
+        return try await Task.detached(priority:.userInitiated) {
+            let boot=CoreGraphicsBackend.bootID
+            let live=try FreshDisplayObserver.read(executable:helper)
+            guard boot == CoreGraphicsBackend.bootID else { throw OmniError.message("读取期间系统会话变化。") }
+            return Snapshot(boot:boot,displays:live)
+        }.value
+    }
+    func prepareRelativeRotation(_ target: String, action: RelativeRotation) {
+        guard !interactionBlocked, actionDisplay == nil, modePreview == nil,
+              let display=displays.first(where:{$0.id==target}), rotationReason(display) == nil else { return }
+        rotationReading=true;rotationAction=action;rotationReadGeneration += 1
+        let generation=rotationReadGeneration
+        Task {
+            do {
+                let entry=try await freshRotationSnapshot()
+                guard generation == rotationReadGeneration, !busy else { return }
+                let request=try action.prepare(target:target,baseline:officeLayout,simulation:simulation,read:{entry})
+                rotationReading=false
+                rotationPreview=ModePreview(request:request)
+            } catch {
+                guard generation == rotationReadGeneration else { return }
+                rotationReading=false;rotationAction=nil;self.error=error.localizedDescription
+            }
+        }
+    }
+    func executeRelativeRotation(_ preview: ModePreview, confirmed: Bool) {
+        guard confirmed, !busy, !rotationReading, rotationPreview?.id == preview.id else { return }
+        rotationReading=true;rotationReadGeneration += 1
+        let generation=rotationReadGeneration
+        Task {
+            do {
+                let entry=try await freshRotationSnapshot()
+                guard generation == rotationReadGeneration, !busy, rotationPreview?.id == preview.id else { return }
+                try RelativeRotation.validateConfirmation(preview.request,current:entry)
+                guard preview.request.rotationBaseline == officeLayout else { throw OmniError.message("办公室基线已变化，请重新点击方向按钮。") }
+                var request=preview.request
+                if !simulation { request.liveConsent=try LiveTestConsent.grant(request:request,confirmedTarget:request.target!,riskAcknowledged:confirmed) }
+                try launch(request)
+                rotationPreview=nil;rotationReading=false;rotationAction=nil
+            } catch {
+                guard generation == rotationReadGeneration else { return }
+                cancelRotationPreview();self.error=error.localizedDescription
+            }
+        }
     }
     private var activeURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-active.json" : "active.json") }
     private func retireRestoredSession() {
@@ -185,7 +225,7 @@ import OmniCore
         } catch { self.error = "完整排列已恢复，但记录归档失败：\(error.localizedDescription)" }
     }
     func saveCurrentLayout() {
-        guard !busy else { return }; refresh()
+        guard !interactionBlocked else { return }; refresh()
         if let sessionLoadError { error = sessionLoadError; return }
         if let session = layoutSession, !session.matchesOriginal(displays.filter(\.active)) {
             error = "完整排列已单独保留。请先连接目标并恢复完整排列，再保存新基准。"; return
@@ -208,6 +248,9 @@ import OmniCore
                 confirmation = nil; physicalConfirmed = false; testRiskAcknowledged = false; inputProbes = [:]
                 rotationUnavailable = Dictionary(uniqueKeysWithValues: latest.compactMap { d in backend.rotationUnavailableReason(d).map { (d.id,$0) } })
             }
+            if let preview=rotationPreview, !busy, !TemporaryLayout.matches(preview.request.before.displays,live) {
+                cancelRotationPreview(); error="屏幕状态已变化，请重新点击方向按钮。"
+            }
             displays = latest
             // A boot transition invalidates cached numeric IDs; do not relabel them as this boot.
             if registry == nil || registry?.boot == currentBoot || offline.isEmpty {
@@ -218,7 +261,7 @@ import OmniCore
     }
     func reason(for action: OmniCore.Operation, display: Display) -> String? {
         if let sessionLoadError { return sessionLoadError }
-        if busy || probingInput != nil { return "请等待当前操作结束。" }
+        if interactionBlocked || probingInput != nil { return "请等待当前操作结束。" }
         if action == .disconnect {
             if !display.active { return "屏幕已不活动。" }
             if activeCount <= 1 { return "不能断开最后一块活动屏幕。" }
@@ -246,6 +289,7 @@ import OmniCore
         return changes.isEmpty ? "临时排列：其他屏幕保持原位。" : "临时排列（点）：\n" + changes.joined(separator:"\n")
     }
     func openActions(_ id: String) {
+        guard !interactionBlocked else { return }
         choose(id)
         onShowManager?()
         actionDisplay = displays.first(where: { $0.id == id })
@@ -346,7 +390,7 @@ import OmniCore
         } catch { self.error = error.localizedDescription }
     }
     func inputTestReason(_ display: Display) -> String? {
-        if busy || probingInput != nil { return "请等待当前操作结束。" }
+        if interactionBlocked || probingInput != nil { return "请等待当前操作结束。" }
         if !display.active || display.builtin || display.main { return "仅对活动的外接非主屏进行切源测试。" }
         if activeCount < 2 { return "必须保留另一块活动实体屏。" }
         if displays.contains(where: { $0.active && $0.mirrored }) { return "镜像模式不支持。" }

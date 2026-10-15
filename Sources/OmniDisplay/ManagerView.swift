@@ -12,7 +12,7 @@ struct ManagerView: View {
     @ObservedObject var model: AppModel
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top) {
                     HStack(spacing: 14) {
                         Image(systemName: "display.2").font(.system(size: 32, weight: .light)).foregroundStyle(accent)
@@ -30,11 +30,11 @@ struct ManagerView: View {
                 ModeControls(model:model).padding(20).modifier(GlassCard())
                 VStack(alignment: .leading, spacing: 18) {
                     HStack { Label("屏幕排列", systemImage: "rectangle.3.group").font(.headline); Spacer(); Text("\(model.activeCount) 活动 · \(model.displays.count) 已知").font(.caption).foregroundStyle(.secondary) }
-                    DisplayMap(model: model).frame(height: 190)
+                    DisplayMap(model: model).frame(height: 130)
                     HStack {
                         Text("点击屏幕以连接、断开或旋转").font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Button("保存当前排列") { model.saveCurrentLayout() }.disabled(model.busy).help("只记录显示器位置、旋转和模式，不调整屏幕，不记录应用窗口")
+                        Button("保存当前排列") { model.saveCurrentLayout() }.disabled(model.interactionBlocked).help("只记录显示器位置、旋转和模式，不调整屏幕，不记录应用窗口")
                     }
                 }.padding(24).modifier(GlassCard())
                 HStack { Text("显示器").font(.headline); Spacer() }
@@ -46,7 +46,7 @@ struct ManagerView: View {
                         Text(model.displayedStatus).font(.caption).textSelection(.enabled)
                         if let history=model.modeFailureHistory { Text("上次操作："+history).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
                         Text("保存显示器排列，不搬动其他 App 的窗口。恢复失败时，请现场核对显示器菜单或单独重插目标视频线。软件无法保证硬件或系统故障时恢复。").font(.caption).foregroundStyle(.secondary)
-                        Text("OmniDisplay 1.0 · 本机版本 · 四方向旋转尚待现场验证").font(.caption2).foregroundStyle(.secondary)
+                        Text("OmniDisplay 1.0.1 · 本机版本 · 四方向旋转尚待现场验证").font(.caption2).foregroundStyle(.secondary)
                     }.padding(.top,8).frame(maxWidth:.infinity,alignment:.leading)
                 }.font(.callout).foregroundStyle(.secondary)
 
@@ -107,6 +107,7 @@ struct DisplayRow: View {
     let display: Display
     let compact: Bool
     var body: some View {
+        VStack(alignment:.leading,spacing:12) {
         Button { model.openActions(display.id) } label: {
             HStack(spacing: 12) {
                 Image(systemName: display.builtin ? "laptopcomputer" : "display").font(.system(size: 22,weight:.light)).foregroundStyle(display.active ? accent : .secondary).frame(width:30)
@@ -120,6 +121,8 @@ struct DisplayRow: View {
             }.padding(compact ? 10 : 16).contentShape(Rectangle())
                 .background(.background.opacity(0.6),in:RoundedRectangle(cornerRadius:14))
         }.buttonStyle(.plain).help("\(display.id) · \(display.active ? "活动" : "未活动：可能软件停用或视频线断开")")
+        if !compact { InlineRotationControls(model:model,display:display).padding([.horizontal,.bottom],12) }
+        }.background(.background.opacity(0.6),in:RoundedRectangle(cornerRadius:14))
     }
 }
 struct ScreenActions: View {
@@ -134,8 +137,6 @@ struct ScreenActions: View {
                     Button { model.choose(d.id); model.prepare(.connect) } label: { Label("连接这块屏幕",systemImage:"link").frame(maxWidth:.infinity,alignment:.leading) }.disabled(model.reason(for:.connect,display:d) != nil)
                     Button { model.choose(d.id); model.prepare(.disconnect) } label: { Label("断开这块屏幕…",systemImage:"link.badge.plus").frame(maxWidth:.infinity,alignment:.leading) }.disabled(model.reason(for:.disconnect,display:d) != nil)
                     if let reason = model.reason(for:d.active ? .disconnect : .connect,display:d) { Text(reason).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true) }
-                    Divider()
-                    RotationControls(model:model, display:d)
                 } else if let action = model.confirmation {
                     Text(action == .connect ? "连接目标并恢复完整原排列，不搬应用窗口。" : "只断开所选屏幕；保留主屏、旋转及相对顺序，剩余屏幕可能临时靠拢。连接时恢复完整原排列；核验后开始45秒确认。").font(.callout).fixedSize(horizontal: false, vertical: true)
                     if action == .disconnect {
@@ -156,20 +157,46 @@ struct ScreenActions: View {
     }
 }
 
-struct RotationControls: View {
+struct InlineRotationControls: View {
     @ObservedObject var model: AppModel
     let display: Display
-    @State private var angle = 0
     var body: some View {
         VStack(alignment:.leading,spacing:10) {
-            Text("屏幕方向").font(.headline)
-            Picker("方向",selection:$angle) {
-                Text("横向 0°").tag(0);Text("竖向 90°").tag(90)
-                Text("横向 180°").tag(180);Text("竖向 270°").tag(270)
-            }.labelsHidden().pickerStyle(.segmented).disabled(model.rotationReason(display) != nil)
-            if let reason=model.rotationReason(display) { Text(reason).font(.caption).foregroundStyle(.secondary) }
-            Button("预览旋转…") { model.prepareRotation(display.id,degrees:angle) }
-                .disabled(angle == Int(display.rotation) || model.rotationReason(display) != nil)
-        }.onAppear { angle=Int(display.rotation) }
+            HStack(spacing:6) {
+                ForEach(RelativeRotation.allCases,id:\.self) { action in
+                    Button { model.prepareRelativeRotation(display.id,action:action) } label: {
+                        Label(action.title,systemImage:action.symbol).font(.caption)
+                    }.help("让眼前画面"+action.title+"，基于当前方向")
+                     .disabled(model.rotationReason(display) != nil)
+                }
+            }
+            if let preview=model.rotationPreview, preview.request.target == display.id {
+                InlineRotationReview(model:model,preview:preview).id(preview.id)
+            } else if let reason=model.rotationReason(display), !model.busy {
+                Text(reason).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+struct InlineRotationReview: View {
+    @ObservedObject var model: AppModel
+    let preview: ModePreview
+    @State private var onsite=false
+    var body: some View {
+        VStack(alignment:.leading,spacing:8) {
+            Text("画面"+(model.rotationAction?.title ?? "旋转")+" · "+(preview.request.before.displays.first{$0.id==preview.request.target}?.shortID ?? "")).font(.callout.weight(.medium))
+            if let plan=try? RotationPlan.make(preview.request) {
+                let moved=plan.desired.filter { next in preview.request.before.displays.contains { $0.id == next.id && ($0.x != next.x || $0.y != next.y) } }
+                Text(moved.isEmpty ? "其他屏幕保持原位" : "相邻屏幕会靠拢，主屏和顺序不变").font(.caption).foregroundStyle(.secondary)
+            }
+            Toggle(model.simulation ? "仅模拟，不改变实体屏幕" : "我在现场，画面异常时能用系统设置恢复",isOn:$onsite).font(.caption).disabled(model.rotationReading)
+            Text("可能短暂黑屏；45秒未保留会尝试恢复。").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("取消") { model.cancelRotationPreview() }
+                Spacer()
+                Button(model.rotationReading ? "核对中…" : model.simulation ? "模拟旋转" : "确认旋转") { model.executeRelativeRotation(preview,confirmed:onsite) }
+                    .buttonStyle(.borderedProminent).disabled(!onsite || model.rotationReading || model.busy)
+            }
+        }.padding(12).background(.blue.opacity(0.06),in:RoundedRectangle(cornerRadius:12))
     }
 }

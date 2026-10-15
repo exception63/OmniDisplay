@@ -34,7 +34,11 @@ enum ConfirmationPlacement {
             }
         }
     }
-    func synchronize() {
+    func synchronize(rotationFallback: Bool = false) {
+        if model.busy, model.transactionRequest?.operation == .rotate, !rotationFallback {
+            if displayedNonce != nil { window?.orderOut(nil); displayedNonce=nil; displayedAwaiting=false }
+            return
+        }
         guard model.busy, let nonce = model.transactionRequest?.nonce else {
             if displayedNonce != nil {
                 window?.orderOut(nil); model.recordConfirmationUI("panelHidden")
@@ -160,12 +164,12 @@ struct TransactionBanner: View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(model.awaitingDecision ? "待确认 · \(model.transactionTargetName) · \(model.countdown)秒" : model.shortTransactionStatus).font(.headline).monospacedDigit()
-                Text(model.transactionRequest?.operation == .officeMode ? "核对全部屏幕；未确认或取消都不会再次断屏。" : model.awaitingDecision ? "检查保留屏幕的画面；不操作会尝试恢复。" : "操作期间请保留此窗口。确认面板将在核验通过后出现。")
+                Text(model.transactionRequest?.operation == .officeMode ? "核对全部屏幕；未确认或取消都不会再次断屏。" : model.awaitingDecision ? "检查保留屏幕的画面；不操作会尝试恢复。" : "操作期间请保留此窗口；核验通过后在这里保留或恢复。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if model.awaitingDecision {
-                Button("打开确认") { model.onShowConfirmation?() }
+                if model.transactionRequest?.operation != .rotate { Button("打开确认") { model.onShowConfirmation?() } }
                 ConfirmationButtons(model: model, source: "managerBanner")
             } else { Button(model.transactionRequest?.operation == .officeMode ? "结束检查，保持连接" : "立即恢复") { model.cancel(source: "managerBanner") } }
         }

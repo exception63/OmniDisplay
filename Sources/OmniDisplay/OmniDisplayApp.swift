@@ -53,7 +53,7 @@ import OmniCore
         model.onShowManager = { [weak self] in self?.showManager() }
         confirmationPanel = ConfirmationPanelController(model: model)
         model.onTransactionUIChange = { [weak self] in
-            self?.confirmationPanel?.synchronize()
+            self?.confirmationPanel?.synchronize(rotationFallback: self?.manager?.isVisible != true || self?.manager?.isMiniaturized == true)
             self?.updateConfirmationStatus()
         }
         model.onShowConfirmation = { [weak self] in
@@ -150,7 +150,7 @@ import OmniCore
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool) -> Bool { if !flag && panel?.isShown != true { showManager() }; return true }
     func windowWillClose(_ notification:Notification) {
-        model.modePreview=nil
+        model.cancelRotationPreview(); model.modePreview=nil
         if let request=model.transactionRequest, ModePlan.isMode(request.operation), model.busy { model.cancel(source:"managerClosed") }
     }
     func applicationWillTerminate(_ notification:Notification) { if model.busy { model.cancel() } }
