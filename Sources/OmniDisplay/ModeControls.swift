@@ -16,7 +16,7 @@ struct ModeControls: View {
                 Button { model.prepareMode(.officeMode) } label:{ Label("办公室",systemImage:"display.2") }
                 Button { model.prepareMode(.remoteMode) } label:{ Label("远程单屏",systemImage:"display") }
             }.buttonStyle(.bordered).disabled(model.busy || model.probingInput != nil)
-            if !compact { Text("完整排列单独保存；远程失败回退入口，办公室恢复不会重新关闭已连接屏幕。输入源独立控制。").font(.caption).foregroundStyle(.secondary) }
+
         }
     }
 }
@@ -27,20 +27,31 @@ struct ModeReview: View {
     var body:some View {
         let r=preview.request
         VStack(alignment:.leading,spacing:16) {
-            Text(r.operation == .remoteMode ? "确认进入远程单屏" : "确认恢复办公室").font(.title2.bold())
-            Text("保留画面：\(r.office.displays.first{$0.id==r.keep}?.name ?? "未知")").font(.headline)
-            ScrollView {
-                if let plan=try? ModePlan.make(r) {
-                    ForEach(Array(plan.steps.enumerated()),id:\.offset) { index,step in
-                        let name=r.office.displays.first{$0.id==step.target}?.name ?? "屏幕排列与主屏"
-                        Text("\(index+1). \(step.action == .enable ? "连接" : step.action == .disable ? "断开" : "核对并恢复") · \(name)").frame(maxWidth:.infinity,alignment:.leading)
-                    }
+            if r.operation == .rotate {
+                Text("确认旋转屏幕").font(.title2.bold())
+                Text("\(r.before.displays.first{$0.id==r.target}?.name ?? "屏幕") → \(r.rotationDegrees ?? 0)°").font(.headline)
+                if let plan=try? RotationPlan.make(r) {
+                    let moved=plan.desired.filter { next in r.before.displays.contains { $0.id==next.id && ($0.x != next.x || $0.y != next.y) } }
+                    Text(moved.isEmpty ? "其他屏幕保持原位。" : "为避免重叠，调整位置："+moved.map(\.name).joined(separator:"、")+"。主屏和顺序不变。").font(.callout)
                 }
-            }.frame(maxHeight:180)
-            Text((r.operation == .remoteMode ? "先确认保留屏已启用，再逐块断开其他屏幕。" : "逐块连接管理屏幕，恢复办公室完整排列、旋转与主屏。") + (r.operation == .officeMode ? "排列可能变化，应用窗口不搬回。失败时保留已连接屏幕并报告尚未恢复的项目；取消或45秒未确认也不会重新断屏。" : "切换期间排列可能变化，应用窗口不搬回。完成后45秒未确认，将恢复本次切换前状态。")).font(.callout)
-            if !model.simulation { Text("悠悠可能短断。须能通过显示器实体OSD选回Mac，并单独重新插拔视频线；软件恢复不能保证硬件/WindowServer故障。").font(.caption).foregroundStyle(.secondary) }
-            Toggle(model.simulation ? "确认仅执行模拟" : "我在现场，保留屏可见，并能手动恢复受影响屏幕",isOn:$physical)
-            HStack { Button("取消") { model.modePreview=nil };Spacer();Button(model.simulation ? "模拟切换" : "确认本次模式切换") { model.executeMode(preview,confirmed:physical) }.buttonStyle(.borderedProminent).disabled(!physical || model.busy) }
+                Text("45秒内不确认会尝试恢复。保留后更新办公室排列；不搬应用窗口。").font(.callout)
+                Toggle(model.simulation ? "仅模拟，不改变实体屏幕" : "我在现场，能核对画面并在系统设置恢复方向",isOn:$physical)
+                if !model.simulation { Text("切换时可能短暂黑屏；硬件或系统故障时自动恢复可能失败。").font(.caption).foregroundStyle(.secondary) }
+            } else {
+                Text(r.operation == .remoteMode ? "进入远程单屏" : "恢复办公室").font(.title2.bold())
+                Text("保留画面：\(r.office.displays.first{$0.id==r.keep}?.name ?? "未知")").font(.headline)
+                if let plan=try? ModePlan.make(r) {
+                    Text(r.operation == .remoteMode ? "将断开 \(plan.steps.filter{$0.action == .disable}.count) 块屏幕。" : "恢复 \(r.office.displays.count) 块屏幕及已保存排列。").font(.callout)
+                }
+                Text(r.operation == .officeMode ? "未确认或取消都会保留已连接屏幕。" : "45秒内不确认会尝试恢复原状态。").font(.callout)
+                Toggle(model.simulation ? "仅模拟，不改变实体屏幕" : "我在现场，保留屏可见，能手动恢复屏幕",isOn:$physical)
+                if !model.simulation { Text("远控可能短断；软件恢复失败时需操作显示器菜单或目标视频线。").font(.caption).foregroundStyle(.secondary) }
+            }
+            HStack {
+                Button("取消") { model.modePreview=nil };Spacer()
+                Button(model.simulation ? "模拟执行" : r.operation == .rotate ? "确认旋转" : "确认切换") { model.executeMode(preview,confirmed:physical) }
+                    .buttonStyle(.borderedProminent).disabled(!physical || model.busy)
+            }
         }.padding(24).frame(width:500)
     }
 }

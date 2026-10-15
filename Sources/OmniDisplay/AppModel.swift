@@ -4,6 +4,8 @@ import AppKit
 import OmniCore
 
 @MainActor final class AppModel: ObservableObject {
+    @Published var rotationUnavailable: [String:String] = [:]
+    private var committedRotation: String?
     @Published var modePreview: ModePreview?
     @Published var modeKeep = ""
     @Published var officeLayout: Snapshot?
@@ -74,6 +76,7 @@ import OmniCore
             do { officeLayout=try Files.read(Snapshot.self,from:modeOfficeURL) }
             catch { modeBaselineError="办公室基线损坏，已阻止模式切换；请保留记录供检查。";self.error=modeBaselineError }
         }
+        if let officeLayout, layout == nil || officeLayout.date > layout!.date { layout = officeLayout }
         refresh()
         modeKeep = displays.first(where: { $0.main && $0.active })?.id ?? ""
         if layout == nil { saveCurrentLayout() }
@@ -108,7 +111,7 @@ import OmniCore
     }
     var displayedStatus: String { modeFailureHistory != nil && receipt?.phase == .failed ? "上次事务：" + status : status }
     func prepareMode(_ action: OmniCore.Operation) {
-        guard !busy, probingInput == nil, ModePlan.isMode(action) else { return }
+        guard !busy, probingInput == nil, [.remoteMode,.officeMode].contains(action) else { return }
         if let modeBaselineError { error=modeBaselineError;return }
         do {
             refresh()
@@ -129,10 +132,40 @@ import OmniCore
             var request=preview.request
             guard TemporaryLayout.matches(request.before.displays,displays.filter(\.active)) else { throw OmniError.message("预览后屏幕状态变化，请重新选择模式。") }
             _ = try ModePlan.make(request)
-            if !simulation { request.liveConsent = try LiveTestConsent.grant(request:request,confirmedTarget:request.keep,riskAcknowledged:confirmed) }
+            if !simulation { request.liveConsent = try LiveTestConsent.grant(request:request,confirmedTarget:request.target ?? request.keep,riskAcknowledged:confirmed) }
+            if request.operation == .rotate {
+                guard request.rotationBaseline == officeLayout else { throw OmniError.message("办公室基线已变化，请重新预览。") }
+                try launch(request);modePreview=nil;return
+            }
             // Persist once before any worker; no intermediate checkpoint becomes the office baseline.
             try Files.write(request.office,to:modeOfficeURL);officeLayout=request.office
             try launch(request);modePreview=nil
+        } catch { self.error=error.localizedDescription }
+    }
+    func rotationReason(_ display: Display) -> String? {
+        if busy { return "请等待当前操作结束" }
+        if !display.active { return "连接后可调整方向" }
+        if displays.contains(where: { $0.active && $0.mirrored }) { return "镜像模式不支持旋转" }
+        if let sessionLoadError { return sessionLoadError }
+        if let session=layoutSession, !session.matchesOriginal(displays.filter(\.active)) { return "先恢复完整排列，再调整方向" }
+        if let modeBaselineError { return modeBaselineError }
+        if officeLayout == nil && displays.contains(where: { !$0.active }) { return "请先连接所有屏幕并保存排列" }
+        if !simulation, let reason=rotationUnavailable[display.id] { return reason }
+        return nil
+    }
+    func prepareRotation(_ target: String, degrees: Int) {
+        guard !busy else { return }
+        refresh()
+        guard let display=displays.first(where:{$0.id==target}) else { return }
+        if let reason=rotationReason(display) { error=reason;return }
+        do {
+            let entry=Snapshot(boot:currentBoot,displays:displays.filter(\.active))
+            let keep=entry.displays.first(where:{$0.id != target && $0.main})?.id ?? entry.displays.first(where:{$0.id != target})?.id ?? target
+            var request=Request(operation:.rotate,before:entry,office:entry,keep:keep,confirmedPhysical:true,simulation:simulation,target:target)
+            request.rotationDegrees=degrees;request.rotationBaseline=officeLayout
+            let plan=try RotationPlan.make(request)
+            guard !plan.steps.isEmpty else { return }
+            actionDisplay=nil;onShowManager?();modePreview=ModePreview(request:request)
         } catch { self.error=error.localizedDescription }
     }
     private var activeURL: URL { dataDirectory.appendingPathComponent(simulation ? "demo-active.json" : "active.json") }
@@ -171,7 +204,10 @@ import OmniCore
             let ids = Set(live.map(\.id))
             let offline = (registry?.displays ?? []).filter { !ids.contains($0.id) }.map { d -> Display in var copy = d; copy.active = false; copy.main = false; return copy }
             let latest = (live + offline).sorted { $0.id < $1.id }
-            if latest != displays { confirmation = nil; physicalConfirmed = false; testRiskAcknowledged = false; inputProbes = [:] }
+            if latest != displays {
+                confirmation = nil; physicalConfirmed = false; testRiskAcknowledged = false; inputProbes = [:]
+                rotationUnavailable = Dictionary(uniqueKeysWithValues: latest.compactMap { d in backend.rotationUnavailableReason(d).map { (d.id,$0) } })
+            }
             displays = latest
             // A boot transition invalidates cached numeric IDs; do not relabel them as this boot.
             if registry == nil || registry?.boot == currentBoot || offline.isEmpty {
@@ -356,9 +392,19 @@ import OmniCore
         do { try Files.write(dir.path, to: activeURL) } catch { try? Files.marker("cancel", in: dir); throw error }
         status = "正在准备目标屏幕操作…"
     }
+    var shortTransactionStatus: String {
+        switch receipt?.phase {
+        case .ready: return "准备中…"
+        case .applying: return transactionRequest?.operation == .rotate ? "正在调整方向…" : "正在调整屏幕…"
+        case .restoring: return "正在恢复，请稍候…"
+        case .awaitingConfirmation: return "请确认画面"
+        case .failed: return "操作未完成，请查看诊断"
+        default: return "屏幕状态已更新"
+        }
+    }
     var awaitingDecision: Bool { busy && receipt?.phase == .awaitingConfirmation }
     var keepButtonTitle: String {
-        switch transactionRequest?.operation { case .remoteMode: return "保留远程模式"; case .officeMode:return "保留办公室模式"; case .disconnect:return "保留断开";default:return "保留更改" }
+        switch transactionRequest?.operation { case .remoteMode: return "保留远程模式"; case .officeMode:return "保留办公室模式"; case .disconnect:return "保留断开";case .rotate:return "保留方向";default:return "保留更改" }
     }
     var transactionTargetName: String {
         transactionRequest?.before.displays.first(where: { $0.id == transactionRequest?.target })?.name ?? "目标屏幕"
@@ -408,6 +454,12 @@ import OmniCore
             }
             if simulation, let inputs = try? Files.read([String: UInt16].self, from: journal.appendingPathComponent("simulated-inputs.json")) {
                 for (target, value) in inputs { inputProbes[target] = InputProbe(target: target, state: .readable, current: value, detail: "模拟输入源；真实屏幕未改变。", simulation: true) }
+            }
+            if next.phase == .confirmed, transactionRequest?.operation == .rotate, committedRotation != transactionRequest?.nonce {
+                committedRotation=transactionRequest?.nonce
+                if let baseline=try? Files.read(Snapshot.self,from:modeOfficeURL) {
+                    officeLayout=baseline;layout=baseline;modeBaselineError=nil
+                } else { error="方向已保留；新基线读取失败，请查看诊断。" }
             }
             if next.phase == .failed {
                 if ModePlan.isMode(transactionRequest?.operation ?? .connect) { modeFailureHistory = next.message }

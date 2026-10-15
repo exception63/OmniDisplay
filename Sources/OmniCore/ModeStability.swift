@@ -3,7 +3,7 @@ import Foundation
 public struct ModeSettleDeadline: LocalizedError {
     public var errorDescription: String? { "模式步骤未在期限内完成活动状态/完整排列核验；未采用迟到读数。" }
 }
-/// Created only after a successful layout commit, never for a pre-write failure.
+/// Created only after a successful geometry submission (layout or explicit rotation), never for a pre-write failure.
 public struct ModePostCommitDeadline: LocalizedError {
     public var errorDescription: String? { ModeSettleDeadline().localizedDescription }
 }

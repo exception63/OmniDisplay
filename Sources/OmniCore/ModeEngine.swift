@@ -42,6 +42,14 @@ public enum ModeEngine {
                 if let step=work.step {
                     guard TemporaryLayout.matches(step.before,live) else { throw OmniError.message("模拟模式并发变化。") }
                     if exists(work.restoring ? "simulation-fail-rollback" : "simulation-fail-step-\(work.index)") { throw OmniError.message("模拟注入步骤失败。") }
+                    if request.operation == .rotate, !work.restoring, exists("simulation-rotation-intermediate") {
+                        var intermediate=step.before
+                        if let i=intermediate.firstIndex(where:{$0.id==request.target}), let rotated=step.after.first(where:{$0.id==request.target}) {
+                            let original=intermediate[i];intermediate[i]=rotated;intermediate[i].x=original.x;intermediate[i].y=original.y
+                        }
+                        try Files.write(intermediate,to:simulated)
+                        throw OmniError.message("模拟旋转完成但排列前失败。")
+                    }
                     try Files.write(step.after,to:simulated)
                     if step.action == .arrange, exists(work.restoring ? "simulation-postcommit-rollback" : "simulation-postcommit-apply") {
                         throw ModePostCommitDeadline()
@@ -120,8 +128,8 @@ public enum ModeEngine {
             try? status(Receipt(.restoring,reason+" 正在恢复本次切换前状态。"))
             do {
                 let current=try read()
-                if plan.recognizes(current,entry:request.before.displays) {
-                    let rollback=try ModePlan.transition(from:current,to:request.before.displays,office:request.office.displays)
+                if request.operation == .rotate ? RotationPlan.recognizes(current,request:request,desired:plan.desired) : plan.recognizes(current,entry:request.before.displays) {
+                    let rollback = request.operation == .rotate ? ModePlan(steps: TemporaryLayout.matches(current,request.before.displays) ? [] : [ModeStep(action:.arrange,target:request.target,before:current,after:request.before.displays)], desired:request.before.displays) : try ModePlan.transition(from:current,to:request.before.displays,office:request.office.displays)
                     for (i,step) in rollback.steps.enumerated() {
                         do { try execute(ModeWork(step:step,rescue:nil,restoring:true,rollbackFrom:current,index:i)) }
                         catch is ModePostCommitDeadline where i == rollback.steps.count-1 && step.action == .arrange && TemporaryLayout.matches(request.before.displays, step.after) {
@@ -149,6 +157,20 @@ public enum ModeEngine {
                 let targetName = request.office.displays.first { $0.id == step.target }?.name ?? "完整办公室排列"
                 try status(Receipt(.applying,"模式步骤 \(i+1)/\(plan.steps.count)：\(step.action == .enable ? "连接" : step.action == .disable ? "断开" : "恢复排列") · \(targetName)；目标 \(step.after.count)/\(request.office.displays.count) 屏活动"))
                 do { try execute(ModeWork(step:step,rescue:nil,restoring:false,rollbackFrom:nil,index:i)) }
+                catch is ModePostCommitDeadline where request.operation == .rotate {
+                    // A new bounded pair after the committed step; still requires user confirmation.
+                    _ = try ModeFinalVerification.wait(expected:plan.desired,office:request.office.displays,boot:request.before.boot,
+                        mayProceed:{ !exists("cancel") },read:{ remaining in
+                            if request.simulation {
+                                if exists("simulation-final-unstable") { throw ObservationNotSettled() }
+                                var live = try read()
+                                if exists("simulation-final-layout") { live[0].y += 17 }
+                                if exists("simulation-final-identity") { live[0].serial += 1 }
+                                return Snapshot(boot:exists("simulation-final-boot") ? "other-boot" : request.before.boot,displays:live)
+                            }
+                            return Snapshot(boot:CoreGraphicsBackend.bootID,displays:try FreshDisplayObserver.read(cancelled:{exists("cancel")},timeout:remaining))
+                        })
+                }
                 catch is ModePostCommitDeadline where request.operation == .officeMode && i == plan.steps.count-1 && step.action == .arrange && TemporaryLayout.matches(request.office.displays, step.after) {
                     finishAfterDeadline(expected: request.office.displays, reason: "办公室恢复。"); return
                 }
@@ -160,7 +182,14 @@ public enum ModeEngine {
             while true {
                 if exists("cancel") || Date()>=deadline || ProcessInfo.processInfo.systemUptime>=end { rollback("已取消或确认倒计时结束。");return }
                 guard TemporaryLayout.matches(plan.desired,try read()) else { throw OmniError.message("确认期间屏幕状态变化。") }
-                if exists("confirm") { try status(Receipt(.confirmed,"模式已由用户确认；办公室完整基线仍保留。"));return }
+                if exists("confirm") {
+                    if request.operation == .rotate {
+                        // Baseline failures must not unexpectedly undo a user-confirmed visible rotation.
+                        do { try RotationBaselineCommit.commit(request:request,desired:plan.desired,directory:directory) }
+                        catch { try status(Receipt(.failed,"方向已保留，但基线未更新："+error.localizedDescription));return }
+                    }
+                    try status(Receipt(.confirmed,request.operation == .rotate ? "方向已保留，办公室排列已更新。" : "模式已由用户确认；办公室完整基线仍保留。"));return
+                }
                 HelperEventLoop.wait(0.1)
             }
         } catch { rollback(error.localizedDescription) }
@@ -208,8 +237,8 @@ public enum ModeEngine {
         let allowed:[ModeStep]
         if work.restoring {
             guard request.operation != .officeMode else { throw OmniError.message("办公室恢复不允许回滚禁用计划。") }
-            guard let from=work.rollbackFrom, plan.recognizes(from,entry:request.before.displays) else { throw OmniError.message("回滚入口不属于本次事务。") }
-            allowed=try ModePlan.transition(from:from,to:request.before.displays,office:request.office.displays).steps
+            guard let from=work.rollbackFrom, (request.operation == .rotate ? RotationPlan.recognizes(from,request:request,desired:plan.desired) : plan.recognizes(from,entry:request.before.displays)) else { throw OmniError.message("回滚入口不属于本次事务。") }
+            allowed = request.operation == .rotate ? [ModeStep(action:.arrange,target:request.target,before:from,after:request.before.displays)] : try ModePlan.transition(from:from,to:request.before.displays,office:request.office.displays).steps
         } else { allowed=plan.steps }
         guard work.index < allowed.count, allowed[work.index]==step else { throw OmniError.message("模式步骤不属于用户确认计划。") }
         _ = try backend.applyModeStep(step,request:request,restoring:work.restoring,mayProceed:proceed)

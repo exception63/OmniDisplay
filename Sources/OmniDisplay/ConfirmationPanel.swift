@@ -131,14 +131,14 @@ struct ConfirmationPanelView: View {
             if !model.awaitingDecision {
                 HStack { ProgressView().controlSize(.small); Text(model.simulation ? "模拟 · 操作进度" : "正在处理屏幕操作").font(.title2.bold()) }
                 Text("目标：\(model.transactionTargetName)").foregroundStyle(.secondary)
-                Text(model.status).fixedSize(horizontal: false, vertical: true)
-                Text(model.transactionRequest?.operation == .officeMode ? "正在逐屏连接并核对原排列；失败或取消时保留已连接屏幕，不退回单屏。" : "布局核验通过后将显示45秒确认。失败或取消时尝试回连并恢复切换前状态。").font(.callout).foregroundStyle(.secondary)
+                Text(model.shortTransactionStatus).fixedSize(horizontal: false, vertical: true)
+                Text(model.transactionRequest?.operation == .officeMode ? "已连接屏幕会保持启用。" : "核验后请在45秒内确认；取消会尝试恢复。").font(.callout).foregroundStyle(.secondary)
                 Button(model.transactionRequest?.operation == .officeMode ? "停止并保留已连接屏幕" : "取消并尝试恢复") { model.cancel(source: "progressPanel") }.disabled(model.decisionPending)
             } else {
             HStack(alignment: .top) {
                 Image(systemName: "display.badge.checkmark").font(.system(size: 30)).foregroundStyle(.blue)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(model.simulation ? "模拟 · 请确认屏幕画面" : "请确认保留屏幕的画面").font(.title2.bold())
+                    Text(model.simulation ? "模拟 · 请确认画面" : "请确认画面").font(.title2.bold())
                     Text("目标：\(model.transactionTargetName)").font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -159,7 +159,7 @@ struct TransactionBanner: View {
     var body: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(model.awaitingDecision ? "待确认 · \(model.transactionTargetName) · \(model.countdown)秒" : model.status).font(.headline).monospacedDigit()
+                Text(model.awaitingDecision ? "待确认 · \(model.transactionTargetName) · \(model.countdown)秒" : model.shortTransactionStatus).font(.headline).monospacedDigit()
                 Text(model.transactionRequest?.operation == .officeMode ? "核对全部屏幕；未确认或取消都不会再次断屏。" : model.awaitingDecision ? "检查保留屏幕的画面；不操作会尝试恢复。" : "操作期间请保留此窗口。确认面板将在核验通过后出现。")
                     .font(.caption).foregroundStyle(.secondary)
             }

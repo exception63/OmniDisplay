@@ -34,6 +34,15 @@ bool ODRotationAvailable(void) {
     Class cls = displayClass();
     return cls && rotationFunction() && [cls instancesRespondToSelector:sel_registerName("initWithCGSDisplayID:")] && [cls instancesRespondToSelector:sel_registerName("setOrientation:")];
 }
+int ODRotationCapability(uint32_t display) {
+    if(!ODRotationAvailable())return 1;
+    @try {
+        id panel=[[displayClass() alloc] initWithCGSDisplayID:(int)display];
+        if(!panel)return 2;
+        SEL can=sel_registerName("canChangeOrientation");
+        return [panel respondsToSelector:can] && [panel canChangeOrientation] ? 0 : 3;
+    } @catch(NSException *exception) { return 4; }
+}
 int ODRotateDisplay(uint32_t display, int degrees) {
     if (!(degrees == 0 || degrees == 90 || degrees == 180 || degrees == 270) || !ODRotationAvailable()) return 1;
     @try {

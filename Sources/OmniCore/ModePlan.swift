@@ -10,7 +10,7 @@ public struct ModeStep: Codable, Equatable, Sendable {
 public struct ModePlan: Sendable {
     public let steps: [ModeStep]
     public let desired: [Display]
-    public static func isMode(_ operation: Operation) -> Bool { [.remoteMode,.officeMode].contains(operation) }
+    public static func isMode(_ operation: Operation) -> Bool { [.remoteMode,.officeMode,.rotate].contains(operation) }
     public static func identities(_ current: [Display], within office: [Display]) -> Bool {
         !current.isEmpty && Set(current.map(\.id)).count == current.count && Set(current.map(\.displayID)).count == current.count &&
         current.filter(\.main).count == 1 && current.allSatisfy { d in
@@ -18,6 +18,7 @@ public struct ModePlan: Sendable {
         }
     }
     public static func make(_ request: Request) throws -> ModePlan {
+        if request.operation == .rotate { return try RotationPlan.make(request) }
         let office=request.office.displays, entry=request.before.displays
         guard isMode(request.operation), request.before.version == 1, request.office.version == 1,
               request.before.boot == request.office.boot, request.before.boot != "unknown", request.confirmedPhysical,

@@ -54,7 +54,7 @@ public struct RemotePlan: Codable, Equatable, Sendable {
         guard current.contains(where: { $0.id == keep && $0.active }), !disable.contains(keep), Set(disable).isSubset(of: Set(current.filter(\.active).map(\.id))) else { throw OmniError.message("安全检查失败：必须保留一块活动实体屏幕。") }
     }
 }
-public enum Operation: String, Codable, Sendable { case remote, restore, connect, disconnect, inputSource, remoteMode, officeMode }
+public enum Operation: String, Codable, Sendable { case remote, restore, connect, disconnect, inputSource, remoteMode, officeMode, rotate }
 public struct Request: Codable, Sendable {
     public var version = 1
     public var nonce: String
@@ -64,6 +64,8 @@ public struct Request: Codable, Sendable {
     public var keep: String
     public var target: String?
     public var preserveLayout: Bool?
+    public var rotationDegrees: Int?
+    public var rotationBaseline: Snapshot?
     public var inputBefore: UInt16?
     public var inputAfter: UInt16?
     public var inputPortsConfirmed: Bool?

@@ -227,7 +227,7 @@ struct MenuPanel: View {
                     Button("打开确认面板") { model.onShowConfirmation?() }.buttonStyle(.borderedProminent)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             } else if model.busy {
-                Text(model.status).font(.caption)
+                Text(model.shortTransactionStatus).font(.caption)
                 Button(model.transactionRequest?.operation == .officeMode ? "停止并保留已连接屏幕" : "立即恢复") { model.cancel(source: "menuBar") }
             }
             ScrollView {

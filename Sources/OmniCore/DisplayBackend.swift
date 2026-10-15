@@ -22,6 +22,12 @@ public final class CoreGraphicsBackend: DisplayBackend {
     private let freshRead: (() throws -> [Display])?
     private let freshObservationTime: (() -> Double?)?
     public var canDisconnect: Bool { enable != nil }
+    public func rotationUnavailableReason(_ display: Display) -> String? {
+        guard display.active else { return "连接后可调整方向" }
+        guard !display.mirrored else { return "镜像模式不支持旋转" }
+        guard Self.uuid(display.displayID) == display.id else { return "屏幕身份已变化" }
+        return ODRotationCapability(display.displayID) == 0 ? nil : "系统未提供该屏的旋转能力"
+    }
     public var canRestoreRotation: Bool { ODRotationAvailable() }
     public init(freshRead: (() throws -> [Display])? = nil, freshObservationTime: (() -> Double?)? = nil, diagnostics: TransactionAudit? = nil) {
         self.diagnostics = diagnostics
@@ -349,9 +355,17 @@ extension CoreGraphicsBackend {
         guard request.operation != .officeMode || step.action != .disable else {
             throw OmniError.message("办公室恢复禁止关闭已连接屏幕。")
         }
-        guard request.before.boot == Self.bootID, let enable else { throw OmniError.message("模式会话或接口失效。") }
+        guard request.before.boot == Self.bootID, request.operation == .rotate || enable != nil else { throw OmniError.message("模式会话或接口失效。") }
         let observed=try list()
         guard mayProceed(), TemporaryLayout.matches(step.before,observed), ModePlan.identities(observed,within:request.office.displays) else { throw OmniError.message("模式步骤前出现并发显示调整。") }
+        if request.operation == .rotate {
+            try RotationPlan.validateStep(step,request:request,restoring:restoring)
+            guard step.action == .arrange, step.target == request.target,
+                  Set(step.before.map(\.id)) == Set(step.after.map(\.id)),
+                  step.after.filter({ $0.id != request.target }).allSatisfy({ next in step.before.contains { old in
+                      old.id == next.id && old.rotation == next.rotation && old.main == next.main && old.width == next.width && old.height == next.height
+                  } }) else { throw OmniError.message("旋转不能启停屏幕或改变其他屏幕方向。") }
+        }
         if step.action == .enable {
             guard let id=step.target, request.office.displays.contains(where:{$0.id==id}), !observed.contains(where:{$0.id==id}) else { throw OmniError.message("模式连接目标无效。") }
             _ = reconnectOnly(request.office,target:id)
@@ -364,7 +378,7 @@ extension CoreGraphicsBackend {
                 guard mayProceed(), DisconnectTopology.sameObservation(observed,try list()),
                       Self.uuid(target.displayID)==id, Self.uuid(retained.displayID)==retained.id,
                       CGDisplayIsActive(retained.displayID) != 0, CGDisplayIsMain(target.displayID)==0 else { throw OmniError.message("模式禁用提交前状态变化。") }
-                try check(enable(config,target.displayID,false),"模式逐屏断开")
+                try check(enable!(config,target.displayID,false),"模式逐屏断开")
             }
         }
         func stable(matching:Bool) throws -> [Display] {
@@ -378,13 +392,28 @@ extension CoreGraphicsBackend {
             if abs(live.rotation-saved.rotation) < 0.1 { continue }
             guard mayProceed(), DisconnectTopology.sameObservation(current,try list()), Self.uuid(live.displayID)==saved.id, ODRotationAvailable() else { throw OmniError.message("模式旋转前状态变化。") }
             try checkRotation(ODRotateDisplay(live.displayID,Int32(saved.rotation)))
+            do {
             current=try RotationWait.wait(target:saved.id,degrees:saved.rotation,timeout:2.5,read:{
                 guard mayProceed() else { throw OmniError.message("模式旋转已取消。") }
                 let live=try self.list()
                 guard ModePlan.identities(live,within:request.office.displays), Set(live.map(\.id))==Set(step.after.map(\.id)) else { throw OmniError.message("模式旋转期间拓扑变化。") };return live
             })
+            } catch is RotationSettleDeadline where request.operation == .rotate { throw ModePostCommitDeadline() }
         }
-        if TemporaryLayout.matches(step.after,current) { return current }
+        if request.operation == .rotate {
+            var rotatedAtOriginalPositions = step.before
+            if let i=rotatedAtOriginalPositions.firstIndex(where:{$0.id==request.target}), let desired=step.after.first(where:{$0.id==request.target}) {
+                let old=rotatedAtOriginalPositions[i];rotatedAtOriginalPositions[i]=desired
+                rotatedAtOriginalPositions[i].x=old.x;rotatedAtOriginalPositions[i].y=old.y
+            }
+            guard TemporaryLayout.matches(step.after,current) || TemporaryLayout.matches(rotatedAtOriginalPositions,current) else {
+                throw OmniError.message("旋转期间出现未预览的布局变化；停止覆盖排列。")
+            }
+        }
+        if TemporaryLayout.matches(step.after,current) {
+            do { return try stable(matching:true) }
+            catch is ModeSettleDeadline where request.operation == .rotate { throw ModePostCommitDeadline() }
+        }
         var modes:[String:CGDisplayMode]=[:]
         for saved in step.after {
             let live=current.first{$0.id==saved.id}!

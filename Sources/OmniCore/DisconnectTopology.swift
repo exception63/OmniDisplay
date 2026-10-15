@@ -85,6 +85,10 @@ public struct DisconnectWatch {
 
 /// Wait for the requested physical angle, not merely for an unchanged wrong value.
 /// Read/clock/pause are injectable so delayed completions can be replayed without I/O.
+public struct RotationSettleDeadline: LocalizedError {
+    public let message: String
+    public var errorDescription: String? { message }
+}
 public enum RotationWait {
     public static func wait(target: String, degrees: Double, timeout: Double,
                             read: () throws -> [Display],
@@ -105,6 +109,6 @@ public enum RotationWait {
             previous=current
             pause(min(0.1,max(0,deadline-now())))
         }
-        throw OmniError.message("\(observed?.name ?? target)：旋转请求后\(timeout)秒仍未核实\(Int(degrees))°（最近读数\(observed.map { String($0.rotation) } ?? "未知")°），停止协调。")
+        throw RotationSettleDeadline(message:"\(observed?.name ?? target)：旋转请求后\(timeout)秒仍未核实\(Int(degrees))°（最近读数\(observed.map { String($0.rotation) } ?? "未知")°），停止协调。")
     }
 }
