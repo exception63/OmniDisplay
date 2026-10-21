@@ -18,6 +18,7 @@ fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 cp "$BIN/OmniDisplay" "$APP/Contents/MacOS/OmniDisplay"
 cp "$BIN/OmniRecovery" "$APP/Contents/Helpers/OmniRecovery"
+cp "$BIN/OmniDisplayCtl" "$APP/Contents/Helpers/omnidisplay"
 cp Resources/OmniDisplay.icns "$APP/Contents/Resources/OmniDisplay.icns"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 if $SIMULATION; then
@@ -31,5 +32,6 @@ cp References/displayplacer/LICENSE "$APP/Contents/Resources/displayplacer-LICEN
 cp References/m1ddc/LICENSE "$APP/Contents/Resources/m1ddc-LICENSE.txt"
 cp References/aspace/LICENSE "$APP/Contents/Resources/aspace-LICENSE.txt"
 codesign --force --sign - "$APP/Contents/Helpers/OmniRecovery"
+codesign --force --sign - "$APP/Contents/Helpers/omnidisplay"
 codesign --force --sign - "$APP"
 echo "$APP"

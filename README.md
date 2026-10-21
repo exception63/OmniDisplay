@@ -1,4 +1,4 @@
-# OmniDisplay 1.0.1
+# OmniDisplay 1.1.0
 
 原生 macOS 菜单栏显示器管理工具，使用 SwiftUI / AppKit。中文窗口动态显示屏幕、连接状态与排列；macOS 26+ 使用正式 Liquid Glass API，旧系统使用原生材质。
 
@@ -13,6 +13,24 @@
 - 每次实际写入需要请求绑定的一次许可与独立helper握手，没有永久解锁。UUID优先；仅恢复允许同次开机、唯一指纹匹配的缺UUID回退。
 
 **相对旋转的实机视觉方向和恢复尚未验收。** 当前Mac Studio/macOS27.0.1四屏只读报告支持方向调整，但能力存在不代表旋转或恢复成功。过去单屏测试与远程保持有成功记录，办公室恢复修复仍待现场复测。软件无法保证WindowServer或硬件故障时恢复；其他机器、Intel、旧系统降级与长期稳定性未验证。[验收记录](docs/VALIDATION.md)。
+
+## 命令行与 agent（1.1）
+
+`omnidisplay` 在 App 包的 `Contents/Helpers/` 里（本机 `~/.local/bin/omnidisplay` 是指向它的软链）。快捷助手、Claude、Codex 和终端都用它控制屏幕，真正执行和做全部安全检查的仍是 App。
+
+- `omnidisplay list`：从左到右编号，连着没有、哪块是主屏
+- `omnidisplay disconnect <n>` / `connect <n>` / `connect all`（全部接回 = 办公室模式）
+- `omnidisplay mode office|remote`：办公室模式（全部屏幕）/ 远程模式（只留主屏）
+- `omnidisplay rotate <n> left|right|flip`：逆时针90° / 顺时针90° / 翻转180°
+- `omnidisplay save-layout`：把当前排列存为办公室基线（屏幕要全部连着）
+- 加 `--json` 输出结构化结果；成功退出码 0，被拒或失败 1
+
+规则：
+- 屏幕从左到右编号；有断开的时候按断开前的完整排列数，断开中间一块，后面的不改号。
+- agent 发起的操作不经二次确认（用户 2026-10-21 授权）：helper 核验通过后由 App 自动保留，不弹确认面板。主屏不能断，agent 的远程模式只留主屏；其余拒绝理由和手动相同。用户在 App 里手动操作仍要二次确认。
+- 命令行把请求写进本机收件箱（`~/Library/Application Support/OmniDisplay/Agent/<实例>/`，仅本用户可读写）；20 秒内没被 App 接手的请求作废，不会在 App 之后启动时补执行。App 没开时命令行在后台拉起它（`--agent`，不弹管理窗口）。
+- 重启后办公室基线过期时，若屏幕全部连着，第一次切模式会以当前排列为准（等于手动「保存当前排列」）。
+- 每笔事务的 `request.json` 记 `origin: "agent"`；模拟端到端检查是 `scripts/test-agent.py`（先 `scripts/build.sh --simulation`）。
 
 ## 构建与启动
 

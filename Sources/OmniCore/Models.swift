@@ -73,6 +73,8 @@ public struct Request: Codable, Sendable {
     public var inputToPort: String?
     public var inputPortMappings: [InputPortMapping]?
     public var liveConsent: LiveTestConsent?
+    /// 谁发起的：nil = 用户在 App 里点的；"agent" = 经 omnidisplay 命令行（用户 2026-10-21 授权，App 自动保留）。
+    public var origin: String?
     public var layoutSession: LayoutSession?
     public var confirmedPhysical: Bool
     public var simulation: Bool

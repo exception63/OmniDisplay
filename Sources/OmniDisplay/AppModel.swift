@@ -230,8 +230,11 @@ import OmniCore
         if let session = layoutSession, !session.matchesOriginal(displays.filter(\.active)) {
             error = "完整排列已单独保留。请先连接目标并恢复完整排列，再保存新基准。"; return
         }
+        do { try writeCurrentLayout() } catch { self.error = error.localizedDescription }
+    }
+    private func writeCurrentLayout() throws {
         let saved = Snapshot(boot: currentBoot, displays: displays)
-        do { guard saved.displays.allSatisfy(\.active), Set(saved.displays.map(\.id)) == Set((officeLayout?.displays ?? saved.displays).map(\.id)) else { throw OmniError.message("请连齐所有管理屏幕后再保存办公室基线。") }; try Files.write(saved,to:modeOfficeURL);officeLayout=saved;modeBaselineError=nil; try Files.write(saved, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json")); layout = saved; status = "已将当前排列设为基准；不记录应用窗口。" } catch { self.error = error.localizedDescription }
+        guard saved.displays.allSatisfy(\.active), Set(saved.displays.map(\.id)) == Set((officeLayout?.displays ?? saved.displays).map(\.id)) else { throw OmniError.message("请连齐所有管理屏幕后再保存办公室基线。") }; try Files.write(saved,to:modeOfficeURL);officeLayout=saved;modeBaselineError=nil; try Files.write(saved, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json")); layout = saved; status = "已将当前排列设为基准；不记录应用窗口。"
     }
     @Published var layout: Snapshot?
     func refresh() {
@@ -308,37 +311,117 @@ import OmniCore
                 if !simulation { guard testRiskAcknowledged else { throw OmniError.message("请核对目标屏幕并确认现场恢复条件。") } }
             }
             guard requestTopology == displays else { throw OmniError.message("连接状态变化，请重新选择。") }
-            _ = try SingleDisplayPlan.make(action: action, target: selected.id, displays: displays, retainedPhysical: retained)
-            if let reason = reason(for: action, display: selected) { throw OmniError.message(reason) }
-            var session = layoutSession
-            if action == .disconnect {
-                let captured = Snapshot(boot: currentBoot, displays: displays.filter(\.active))
-                session = try LayoutSession.make(original: captured, target: selected.id)
-                try Files.write(session!, to: sessionURL)
-                layoutSession = session
-                try Files.write(captured, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json"))
-                layout = captured
-            }
-            var baseline = displays
-            if action == .connect, session == nil, let saved = layout?.displays.first(where: { $0.id == selected.id }) {
-                baseline = baseline.map { current in
-                    guard current.id == selected.id else { return current }
-                    var d = current; d.x = saved.x; d.y = saved.y; d.width = saved.width; d.height = saved.height; d.pixelWidth = saved.pixelWidth; d.pixelHeight = saved.pixelHeight; d.refresh = saved.refresh; d.rotation = saved.rotation; d.main = saved.main; return d
-                }
-            }
-            if action == .disconnect { baseline = session!.original.displays }
-            if let session {
-                try session.validate(boot: currentBoot)
-                guard session.target == selected.id || action == .disconnect else { throw OmniError.message("请先连接上次断开的目标屏幕。") }
-            }
-            let before = Snapshot(boot: registry?.boot ?? currentBoot, displays: baseline)
-            var request = Request(operation: action, before: before, office: before, keep: retained, confirmedPhysical: physicalConfirmed, simulation: simulation, target: selected.id)
-            request.layoutSession = session
-            if action == .disconnect && !simulation { request.liveConsent = try LiveTestConsent.grant(request: request, confirmedTarget: selected.id, riskAcknowledged: testRiskAcknowledged) }
-            try launch(request)
+            try startSingle(action, selected: selected, retained: retained, confirmedPhysical: physicalConfirmed, riskAcknowledged: testRiskAcknowledged, origin: nil)
             confirmation = nil; actionDisplay = nil
         } catch { self.error = error.localizedDescription }
     }
+    /// 单屏连接 / 断开的核心：手动（两次确认之后）和 agent 共用，检查一条不少。
+    private func startSingle(_ action: OmniCore.Operation, selected: Display, retained: String, confirmedPhysical: Bool, riskAcknowledged: Bool, origin: String?) throws {
+        _ = try SingleDisplayPlan.make(action: action, target: selected.id, displays: displays, retainedPhysical: retained)
+        if let reason = reason(for: action, display: selected) { throw OmniError.message(reason) }
+        var session = layoutSession
+        if action == .disconnect {
+            let captured = Snapshot(boot: currentBoot, displays: displays.filter(\.active))
+            session = try LayoutSession.make(original: captured, target: selected.id)
+            try Files.write(session!, to: sessionURL)
+            layoutSession = session
+            try Files.write(captured, to: dataDirectory.appendingPathComponent(simulation ? "demo-layout.json" : "layout.json"))
+            layout = captured
+        }
+        var baseline = displays
+        if action == .connect, session == nil, let saved = layout?.displays.first(where: { $0.id == selected.id }) {
+            baseline = baseline.map { current in
+                guard current.id == selected.id else { return current }
+                var d = current; d.x = saved.x; d.y = saved.y; d.width = saved.width; d.height = saved.height; d.pixelWidth = saved.pixelWidth; d.pixelHeight = saved.pixelHeight; d.refresh = saved.refresh; d.rotation = saved.rotation; d.main = saved.main; return d
+            }
+        }
+        if action == .disconnect { baseline = session!.original.displays }
+        if let session {
+            try session.validate(boot: currentBoot)
+            guard session.target == selected.id || action == .disconnect else { throw OmniError.message("请先连接上次断开的目标屏幕。") }
+        }
+        let before = Snapshot(boot: registry?.boot ?? currentBoot, displays: baseline)
+        var request = Request(operation: action, before: before, office: before, keep: retained, confirmedPhysical: confirmedPhysical, simulation: simulation, target: selected.id)
+        request.layoutSession = session
+        request.origin = origin
+        if action == .disconnect && !simulation { request.liveConsent = try LiveTestConsent.grant(request: request, confirmedTarget: selected.id, riskAcknowledged: riskAcknowledged) }
+        try launch(request)
+    }
+    // MARK: - agent（omnidisplay 命令行；用户 2026-10-21 授权：不经勾选和二次确认，App 自动保留）
+
+    /// 从左到右的编号（见 ScreenNumbering）：断开中间一块，后面的不改号。
+    var numberedScreens: [Display] { ScreenNumbering.ordered(current: displays, references: [layoutSession?.original, officeLayout, layout]) }
+
+    enum AgentStart { case started(nonce: String, note: String?), done(String) }
+
+    func agentSingle(_ action: OmniCore.Operation, target id: String) throws -> AgentStart {
+        refresh()
+        guard let display = displays.first(where: { $0.id == id }) else { throw OmniError.message("找不到这块屏幕。") }
+        if action == .connect && display.active { return .done("这块屏幕已经连着。") }
+        if action == .disconnect && !display.active { return .done("这块屏幕已经断开。") }
+        // 主屏、最后一块、内置屏、指纹不唯一、排列未恢复……和手动是同一套拒绝理由。
+        if let reason = reason(for: action, display: display) { throw OmniError.message(reason) }
+        let keep = displays.first(where: { $0.active && $0.id != id && $0.main })?.id ?? displays.first(where: { $0.active && $0.id != id })?.id ?? ""
+        confirmation = nil; actionDisplay = nil
+        try startSingle(action, selected: display, retained: keep, confirmedPhysical: true, riskAcknowledged: true, origin: "agent")
+        return .started(nonce: transactionRequest?.nonce ?? "", note: nil)
+    }
+
+    func agentMode(_ action: OmniCore.Operation) throws -> AgentStart {
+        guard [.remoteMode, .officeMode].contains(action) else { throw OmniError.message("不支持的模式。") }
+        if interactionBlocked || probingInput != nil { throw OmniError.message("请等待当前操作结束。") }
+        if let modeBaselineError { throw OmniError.message(modeBaselineError) }
+        refresh()
+        var note: String?
+        let entry = Snapshot(boot: currentBoot, displays: displays.filter(\.active))
+        var baseline = officeLayout ?? layoutSession?.original ?? layout ?? entry
+        if !(baseline.displays.allSatisfy(\.active) && baseline.boot == currentBoot) {
+            // 重启后基线过期：屏幕都连着、没有没接回的单屏时，以当前排列为准（等于手动点「保存当前排列」）。
+            guard displays.allSatisfy(\.active), layoutSession == nil else {
+                throw OmniError.message("办公室基线是上次开机时存的，现在又有屏幕没连着，不能确定完整排列；先把屏幕都接上再切模式。")
+            }
+            try writeCurrentLayout(); baseline = officeLayout ?? entry; note = "已按当前排列更新办公室基线。"
+        }
+        // agent 的远程模式只留主屏：主屏不让 agent 断（用户 2026-10-21 定）。
+        let keep = baseline.displays.first(where: \.main)?.id ?? ""
+        var request = Request(operation: action, before: entry, office: baseline, keep: keep, confirmedPhysical: true, simulation: simulation, target: keep)
+        request.origin = "agent"
+        let plan = try ModePlan.make(request)
+        if plan.steps.isEmpty { return .done([note, "现在已经是\(action == .officeMode ? "办公室" : "远程")模式。"].compactMap { $0 }.joined(separator: " ")) }
+        if !simulation { request.liveConsent = try LiveTestConsent.grant(request: request, confirmedTarget: keep, riskAcknowledged: true) }
+        // 和手动一样：先写一次基线再起 helper，中间状态不会变成基线。
+        try Files.write(request.office, to: modeOfficeURL); officeLayout = request.office
+        modePreview = nil
+        try launch(request)
+        return .started(nonce: request.nonce, note: note)
+    }
+
+    func agentRotate(_ id: String, _ action: RelativeRotation) async throws -> AgentStart {
+        refresh()
+        guard let display = displays.first(where: { $0.id == id }) else { throw OmniError.message("找不到这块屏幕。") }
+        if let reason = rotationReason(display) { throw OmniError.message(reason) }
+        rotationReading = true; rotationReadGeneration += 1
+        defer { rotationReading = false; rotationAction = nil }
+        let entry = try await freshRotationSnapshot()   // 每次都现读角度，不用缓存
+        guard !busy, rotationPreview == nil else { throw OmniError.message("请等待当前操作结束。") }
+        var request = try action.prepare(target: id, baseline: officeLayout, simulation: simulation, read: { entry })
+        request.origin = "agent"
+        if !simulation { request.liveConsent = try LiveTestConsent.grant(request: request, confirmedTarget: id, riskAcknowledged: true) }
+        try launch(request)
+        return .started(nonce: request.nonce, note: nil)
+    }
+
+    func agentSaveLayout() throws -> String {
+        guard !interactionBlocked else { throw OmniError.message("请等待当前操作结束。") }
+        refresh()
+        if let sessionLoadError { throw OmniError.message(sessionLoadError) }
+        if let session = layoutSession, !session.matchesOriginal(displays.filter(\.active)) {
+            throw OmniError.message("有一块屏幕断开后还没接回；先接回再保存排列。")
+        }
+        try writeCurrentLayout()
+        return "已把当前排列存为办公室基线。"
+    }
+
     func probeInput(_ target: String) {
         guard !busy, probingInput == nil, let display = displays.first(where: { $0.id == target }) else { return }
         if simulation {
@@ -446,7 +529,8 @@ import OmniCore
         default: return "屏幕状态已更新"
         }
     }
-    var awaitingDecision: Bool { busy && receipt?.phase == .awaitingConfirmation }
+    var awaitingDecision: Bool { busy && receipt?.phase == .awaitingConfirmation && !agentTransaction }
+    var agentTransaction: Bool { transactionRequest?.origin == "agent" }
     var keepButtonTitle: String {
         switch transactionRequest?.operation { case .remoteMode: return "保留远程模式"; case .officeMode:return "保留办公室模式"; case .disconnect:return "保留断开";case .rotate:return "保留方向";default:return "保留更改" }
     }
@@ -477,6 +561,12 @@ import OmniCore
         recordConfirmationUI("keepClicked", details: ["source": source])
         guard awaitingDecision, countdown > 0, !decisionPending, let journal else { return }
         do { try Files.marker("confirm", in: journal); decisionPending = true; recordConfirmationUI("confirmMarkerWritten", details: ["source": source]) }
+        catch { self.error = error.localizedDescription }
+    }
+    /// agent 发起的那一笔：helper 核验通过、进入待确认后，由收件箱替用户「保留」（用户 2026-10-21 授权）。
+    func confirmForAgent() {
+        guard busy, agentTransaction, receipt?.phase == .awaitingConfirmation, !decisionPending, let journal else { return }
+        do { try Files.marker("confirm", in: journal); decisionPending = true; recordConfirmationUI("confirmMarkerWritten", details: ["source": "agent"]) }
         catch { self.error = error.localizedDescription }
     }
     func cancel(source: String = "system") {

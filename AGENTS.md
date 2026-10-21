@@ -2,6 +2,8 @@
 
 Read README.md and docs/VALIDATION.md before changing behavior. Keep the native SwiftUI/macOS architecture.
 
+- 2026-10-21（1.1）：命令行 `omnidisplay`（App 包内 `Contents/Helpers/omnidisplay`）让 agent 直接连接 / 断开单屏、切办公室 / 远程模式、相对旋转、保存排列，不经用户二次确认；App 收件箱照常走单次许可、helper 核验与恢复，核验通过后自动保留。屏幕从左到右编号；主屏不能断（agent 的远程模式只留主屏），其余拒绝理由与手动相同，不得绕过。App 内手动操作仍要二次确认。改了这条路径跑 `swift test`、`scripts/test-agent.py` 和原有模拟。
+
 - Automated agents must not disconnect physical screens, switch inputs, change main display, rotate displays, reboot or log out to test. Use read-only inspection and simulation.
 - Real writes require a user-selected target and explicit in-app confirmation, a request-bound single-use permit and a ready recovery helper. No global unlock, batch remote/office mode, or moving other apps' windows.
 - Never disable the last retained physical screen. Reject ambiguous identity/topology and mirroring. Preserve layout/rotation; recovery must not disable newly attached screens.

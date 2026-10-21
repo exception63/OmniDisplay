@@ -18,6 +18,7 @@ import OmniCore
     private var manager: NSWindow?
     private var presentationGeneration = 0
     private var menuHost: NSHostingController<MenuPanel>?
+    private var agentInbox: AgentInbox?
     private func recordUI(_ event: String) {
         let record: [String: Any] = ["simulation": model.simulation, "bundlePath": Bundle.main.bundleURL.path, "bundleID": Bundle.main.bundleIdentifier ?? "", "dataDirectory": model.dataDirectory.path, "statusTitle": statusItem?.button?.title ?? "", "remaining": model.countdown, "awaitingConfirmation": model.awaitingDecision, "buttonBounds": statusItem?.button.map { NSStringFromRect($0.bounds) } ?? "none", "popoverFrame": panel?.contentViewController?.view.window.map { NSStringFromRect($0.frame) } ?? "none", "popoverContentSize": panel.map { NSStringFromSize($0.contentSize) } ?? "none", "event": event, "pid": ProcessInfo.processInfo.processIdentifier, "managerVisible": manager?.isVisible ?? false, "appActive": NSApp.isActive, "managerKey": manager?.isKeyWindow ?? false, "keyWindowClass": NSApp.keyWindow.map { String(describing: type(of: $0)) } ?? "none", "firstResponderClass": NSApp.keyWindow?.firstResponder.map { String(describing: type(of: $0)) } ?? "none", "panelShown": panel?.isShown ?? false, "statusVisible": statusItem?.isVisible ?? false, "statusFrame": statusItem?.button?.window.map { NSStringFromRect($0.frame) } ?? "none"]
         if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) { try? data.write(to: model.dataDirectory.appendingPathComponent("ui-state.json"), options: .atomic) }
@@ -62,7 +63,11 @@ import OmniCore
             self.panel?.performClose(nil)
             self.confirmationPanel?.reopen()
         }
-        showManager()
+        // omnidisplay 命令行的收件箱（本机目录，按实例分开；模拟版和正式版互不串）。
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        agentInbox = AgentInbox(model: model, directory: AgentMailbox.directory(support: support, instanceKey: configuration.instanceKey))
+        // 命令行替你拉起 App 时（--agent）不弹管理窗口。
+        if !CommandLine.arguments.contains("--agent") { showManager() }
         confirmationPanel?.synchronize()
         updateConfirmationStatus()
     }
